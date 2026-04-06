@@ -4,9 +4,9 @@ import { createSessionStateStore } from "./session-state"
 import { createIdleHandler } from "./idle-handler"
 
 const AutoContinuePlugin: Plugin = async (ctx) => {
-  const config = loadConfig(ctx.directory)
   const sessionStateStore = createSessionStateStore()
-  const idleHandler = createIdleHandler({ ctx, config, sessionStateStore })
+  const getConfig = () => loadConfig(ctx.directory)
+  const idleHandler = createIdleHandler({ ctx, getConfig, sessionStateStore })
 
   return {
     event: idleHandler,

@@ -5,11 +5,25 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "bun build src/index.ts --outdir dist --target bun --format esm && tsc --emitDeclarationOnly",
+    "prepublishOnly": "bun run build",
     "typecheck": "tsc --noEmit",
     "dev": "bun build src/index.ts --outdir dist --target bun --format esm --watch"
   },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hjzccc/opencode-auto-continue.git"
+  },
+  "keywords": [
+    "opencode",
+    "plugin",
+    "auto-continue"
+  ],
   "dependencies": {
     "@opencode-ai/plugin": "^1.2.27"
   },

@@ -12,12 +12,15 @@ export function createSessionStateStore() {
       consecutiveCount: 0,
       lastAssistantMessageId: undefined,
       inFlight: false,
+      deferredTimer: undefined,
     }
     states.set(sessionID, created)
     return created
   }
 
   function cleanup(sessionID: string): void {
+    const state = states.get(sessionID)
+    if (state?.deferredTimer) clearTimeout(state.deferredTimer)
     states.delete(sessionID)
   }
 

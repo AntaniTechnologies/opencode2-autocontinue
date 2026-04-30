@@ -30,6 +30,7 @@ When an OpenCode session emits a `session.idle` event, the plugin automatically 
 - Respects a cooldown period between consecutive injections
 - Caps the maximum number of consecutive auto-continues to prevent infinite loops
 - Resets the consecutive counter when the user sends a real (non-continue) message
+- Re-checks session status immediately before sending and skips the injection if the session is no longer idle (closes the race window opened by cooldown deferral)
 - Cleans up state when sessions are deleted
 
 ## Configuration

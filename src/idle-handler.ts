@@ -72,6 +72,26 @@ function hasRealUserMessageAfterLastContinue(
   return false
 }
 
+type SessionStatusEntry = { type?: string }
+
+async function isSessionIdle(
+  ctx: PluginInput,
+  sessionID: string,
+): Promise<boolean> {
+  try {
+    const response = await ctx.client.session.status({
+      query: { directory: ctx.directory },
+    })
+    const map = ((response as { data?: unknown })?.data ?? response ?? {}) as Record<
+      string,
+      SessionStatusEntry
+    >
+    return !map[sessionID]
+  } catch {
+    return true
+  }
+}
+
 export function createIdleHandler(args: {
   ctx: PluginInput
   getConfig: () => PluginConfig
@@ -109,6 +129,8 @@ export function createIdleHandler(args: {
     if (state.consecutiveCount >= config.max_consecutive) return
 
     const agent = assistantCtx.agent ?? resolveAgentFromUserMessages(messages)
+
+    if (!(await isSessionIdle(ctx, sessionID))) return
 
     state.inFlight = true
     try {

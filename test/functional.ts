@@ -5,8 +5,10 @@ import { join } from "node:path"
 const calls: string[] = []
 let prompts: Array<Record<string, unknown>> = []
 
-function makeMessages(withAssistant: boolean, lastUserText: string, finish?: string) {
-  const msgs: Array<Record<string, unknown>> = []
+// Real context order is chronological: the user prompt, then the assistant
+// reply. `finish` defaults to "length" (a stall); pass null to omit it.
+function makeMessages(withAssistant: boolean, lastUserText: string, finish: string | null = "length", extra: Record<string, unknown> = {}) {
+  const msgs: Array<Record<string, unknown>> = [{ type: "user", id: "msg_user_1", text: lastUserText }]
   if (withAssistant) {
     msgs.push({
       type: "assistant",
@@ -15,9 +17,9 @@ function makeMessages(withAssistant: boolean, lastUserText: string, finish?: str
       model: { providerID: "anthropic", id: "claude-sonnet-4-5" },
       content: [{ type: "text", text: "done" }],
       ...(finish ? { finish } : {}),
+      ...extra,
     })
   }
-  msgs.push({ type: "user", id: "msg_user_1", text: lastUserText })
   return msgs
 }
 
@@ -150,7 +152,7 @@ console.log("case 2: repeated idle, unchanged assistant msg -> expect no duplica
     { type: "session.idle", data: { sessionID: "ses_2" } },
   )
   await tick()
-  h.session.context = async () => makeMessages(true, "continue")
+  h.session.context = async () => [...makeMessages(true, "do the thing"), { type: "user", id: "u2", text: "continue" }]
   h.push({ type: "session.idle", data: { sessionID: "ses_2" } })
   await tick()
   check("injections after 2nd idle", prompts.length, 1)
@@ -209,19 +211,22 @@ console.log("case 6: max_consecutive cap -> expect injection to stop at cap")
     join(dir3, ".opencode", "auto-continue.json"),
     JSON.stringify({ enabled: true, cooldown_ms: 0, max_consecutive: 2 }),
   )
-  const h = makeCtx(dir3, makeMessages(true, "continue"), {})
+  const h = makeCtx(dir3, makeMessages(true, "go"), {})
   const cleanup = await plugin.setup(h.ctx)
   for (let n = 1; n <= 5; n++) {
     const id = `msg_assistant_${n}`
     h.session.context = async () => [
+      { type: "user", id: "u_0", text: "go" },
+      { type: "assistant", id: "a_0", agent: "build", model: { providerID: "anthropic", id: "claude-sonnet-4-5" }, content: [{ type: "text", text: "x" }], finish: "length" },
+      { type: "user", id: `u_${n}`, text: "continue" },
       {
         type: "assistant",
         id,
         agent: "build",
         model: { providerID: "anthropic", id: "claude-sonnet-4-5" },
         content: [{ type: "text", text: "x" }],
+        finish: "length",
       },
-      { type: "user", id: `u_${n}`, text: "continue" },
     ]
     h.push({ type: "session.idle", data: { sessionID: "ses_6" } })
     await tick()
@@ -444,6 +449,116 @@ console.log("case 15: invalid option value must not clobber the project file")
   const r3 = resolveConfig(dir12, { enabled: true, cooldown_ms: "fast", message: 5 })
   check("bad cooldown ignored", r3.config.cooldown_ms, 10000)
   check("bad message ignored", r3.config.message, "continue")
+}
+
+
+function mkDir(cfg: Record<string, unknown>, tag: string) {
+  const d = mkdtempSync(join(tmpdir(), `ac-${tag}-`))
+  mkdirSync(join(d, ".opencode"), { recursive: true })
+  writeFileSync(join(d, ".opencode", "auto-continue.json"), JSON.stringify({ enabled: true, cooldown_ms: 0, ...cfg }))
+  return d
+}
+async function runTurn(dir: string, messages: any, sid: string, wait = 600, mutate?: (h: any) => void) {
+  reset()
+  const h = makeCtx(dir, messages, {})
+  mutate?.(h)
+  const cleanup = await plugin.setup(h.ctx)
+  h.push(
+    { type: "session.execution.started", data: { sessionID: sid } },
+    { type: "session.execution.succeeded", data: { sessionID: sid } },
+  )
+  await new Promise((r) => setTimeout(r, wait))
+  await cleanup?.()
+  return h
+}
+
+console.log("case 16: finish never present (cleanly ended turn, no finish field) -> expect NO injection")
+{
+  await runTurn(mkDir({ settle_ms: 200 }, "nofin"), makeMessages(true, "go", null), "ses_16")
+  check("injections", prompts.length, 0)
+}
+
+console.log("case 17: finish arrives late as stop (event outran projection) -> expect NO injection")
+{
+  let reads = 0
+  await runTurn(mkDir({ settle_ms: 1500 }, "late-stop"), [], "ses_17", 1200, (h) => {
+    h.session.context = async () => (++reads < 4 ? makeMessages(true, "go", null) : makeMessages(true, "go", "stop"))
+  })
+  check("injections", prompts.length, 0)
+  check("it did wait and re-read", reads >= 4, true)
+}
+
+console.log("case 18: finish arrives late as length -> expect injection")
+{
+  let reads = 0
+  await runTurn(mkDir({ settle_ms: 1500 }, "late-len"), [], "ses_18", 1200, (h) => {
+    h.session.context = async () => (++reads < 3 ? makeMessages(true, "go", null) : makeMessages(true, "go", "length"))
+  })
+  check("injections", prompts.length, 1)
+}
+
+console.log("case 19: assistant message with error + finish=length -> expect NO injection")
+{
+  await runTurn(mkDir({}, "err"), makeMessages(true, "go", "length", { error: { message: "boom" } }), "ses_19")
+  check("injections", prompts.length, 0)
+}
+
+console.log("case 20: no finish but a tool call left running -> expect injection")
+{
+  const msgs = makeMessages(true, "go", null, { content: [{ type: "tool", id: "t1", name: "bash", state: { status: "running" } }] })
+  await runTurn(mkDir({ settle_ms: 200 }, "tool"), msgs, "ses_20")
+  check("injections", prompts.length, 1)
+}
+
+console.log("case 21: continue_on_missing_finish=true and no finish -> expect injection")
+{
+  await runTurn(mkDir({ settle_ms: 200, continue_on_missing_finish: true }, "miss"), makeMessages(true, "go", null), "ses_21")
+  check("injections", prompts.length, 1)
+}
+
+console.log("case 22: finish=stop with an empty turn -> expect injection; stop with text -> none")
+{
+  await runTurn(mkDir({}, "empty"), makeMessages(true, "go", "stop", { content: [] }), "ses_22")
+  check("empty stop injected", prompts.length, 1)
+  await runTurn(mkDir({}, "textstop"), makeMessages(true, "go", "stop"), "ses_22b")
+  check("stop with text not injected", prompts.length, 0)
+}
+
+console.log("case 23: execution.succeeded + session.idle for one turn -> expect exactly 1 injection")
+{
+  reset()
+  const d = mkDir({ settle_ms: 500 }, "dup")
+  const h = makeCtx(d, makeMessages(true, "go"), {})
+  const cleanup = await plugin.setup(h.ctx)
+  h.push(
+    { type: "session.execution.succeeded", data: { sessionID: "ses_23" } },
+    { type: "session.idle", data: { sessionID: "ses_23" } },
+  )
+  await new Promise((r) => setTimeout(r, 600))
+  await cleanup?.()
+  check("injections", prompts.length, 1)
+}
+
+console.log("case 24: user message already queued after last assistant -> expect NO injection")
+{
+  const msgs = [...makeMessages(true, "go"), { type: "user", id: "u_next", text: "also do X" }]
+  await runTurn(mkDir({}, "queued"), msgs, "ses_24")
+  check("injections", prompts.length, 0)
+}
+
+console.log("case 25: session goes busy during the settle wait -> expect NO injection")
+{
+  reset()
+  const d = mkDir({ settle_ms: 800 }, "busy")
+  const h = makeCtx(d, makeMessages(true, "go", null), {})
+  const cleanup = await plugin.setup(h.ctx)
+  h.push({ type: "session.execution.succeeded", data: { sessionID: "ses_25" } })
+  await new Promise((r) => setTimeout(r, 150))
+  h.session.context = async () => makeMessages(true, "go", "length")
+  h.push({ type: "session.execution.started", data: { sessionID: "ses_25" } })
+  await new Promise((r) => setTimeout(r, 1000))
+  await cleanup?.()
+  check("injections", prompts.length, 0)
 }
 
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`)

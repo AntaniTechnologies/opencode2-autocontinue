@@ -57,6 +57,10 @@ function normalizeOptions(options?: { readonly [key: string]: unknown }): Partia
   if (typeof options.message === "string") out.message = options.message
   if (typeof options.cooldown_ms === "number") out.cooldown_ms = options.cooldown_ms
   if (typeof options.max_consecutive === "number") out.max_consecutive = options.max_consecutive
+  if (typeof options.settle_ms === "number" && Number.isFinite(options.settle_ms)) out.settle_ms = options.settle_ms
+  if (typeof options.continue_on_missing_finish === "boolean") {
+    out.continue_on_missing_finish = options.continue_on_missing_finish
+  }
   // Enumerated options are only recorded when actually valid. Coercing a bad
   // value to the default here would let it override a good value from the
   // project file, since precedence is decided by presence.
@@ -106,6 +110,8 @@ export function resolveConfig(
     message: pick("message"),
     cooldown_ms: pick("cooldown_ms"),
     max_consecutive: pick("max_consecutive"),
+    settle_ms: pick("settle_ms"),
+    continue_on_missing_finish: pick("continue_on_missing_finish"),
     trigger_policy: normalizeTriggerPolicy(pick("trigger_policy"), DEFAULT_CONFIG.trigger_policy),
     log_level: normalizeLogLevel(pick("log_level"), DEFAULT_CONFIG.log_level),
     log_path:

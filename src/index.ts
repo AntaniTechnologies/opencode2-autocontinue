@@ -1,12 +1,18 @@
-import { Plugin } from "@opencode/plugin"
+import type { Plugin } from "@opencode/plugin"
 import { resolveConfig } from "./config.js"
 import { createSessionStateStore } from "./session-state.js"
 import { createIdleHandler, type PluginEvent } from "./idle-handler.js"
 import { createLogger, type Logger } from "./logger.js"
 
-export default Plugin.define({
+// ponytail: `@opencode/plugin`'s `Plugin.define` is `(plugin) => plugin`, but
+// importing it as a value drags @opencode/plugin plus its effect/zod/ai-sdk
+// closure (~80 MB of node_modules) into a plugin that only needs the *type*.
+// A plain literal with a typed `ctx` keeps dist free of runtime imports, so the
+// plugin runs with no node_modules at all. If a future @opencode/plugin makes
+// `define` do real work, this needs revisiting.
+const plugin = {
   id: "auto-continue",
-  setup(ctx) {
+  setup(ctx: Plugin.Context) {
     const sessionStateStore = createSessionStateStore()
 
     const getResolved = () => resolveConfig(ctx.location.directory, ctx.options)
@@ -59,6 +65,17 @@ export default Plugin.define({
 
     const controller = new AbortController()
 
+    // Deliberately not awaited inside the event loop. A decision can wait on
+    // I/O (settling, session.context, switchAgent); awaiting it there would
+    // park later events, so a `session.execution.started` arriving mid-decision
+    // could not mark the session busy until the stale decision had already
+    // fired its "continue".
+    const dispatchIdle = (sessionID: string, trigger: "session.idle" | "session.execution.succeeded") => {
+      handler.onBecameIdle(sessionID, trigger).catch((error) => {
+        logger.error("idle handler threw", { sessionID, trigger, error })
+      })
+    }
+
     void (async () => {
       try {
         for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
@@ -77,7 +94,7 @@ export default Plugin.define({
               if (sessionID) {
                 busy.delete(sessionID)
                 logger.debug("execution succeeded", { sessionID })
-                await handler.onBecameIdle(sessionID, "session.execution.succeeded")
+                dispatchIdle(sessionID, "session.execution.succeeded")
               }
               break
             case "session.execution.failed":
@@ -100,7 +117,7 @@ export default Plugin.define({
               }
               busy.delete(sessionID)
               logger.debug("session idle", { sessionID })
-              await handler.onBecameIdle(sessionID, "session.idle")
+              dispatchIdle(sessionID, "session.idle")
               break
             case "session.deleted":
               if (sessionID) {
@@ -129,4 +146,6 @@ export default Plugin.define({
       busy.clear()
     }
   },
-})
+}
+
+export default plugin

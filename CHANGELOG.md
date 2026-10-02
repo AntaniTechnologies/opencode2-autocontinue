@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2026-10-02
+
+### Fixed
+
+- Improved stability and responsiveness in all conditions.
+
+### Changed
+
+- Unified package presentation as `opencode2-autocontinue` (`package.json` name/keywords, `package-lock.json`, README install paths).
+
+## [0.4.1] - 2026-10-02
+
+### Fixed
+
+- **Auto-continue fired on correctly finished sessions.** Root causes, all in the "is this a stall?" decision:
+  - A last assistant message with **no `finish` field was treated as unfinished**. `session.execution.succeeded` can be delivered before the message projection records the finish reason, so a cleanly completed turn was read as stalled. The handler now waits (bounded by `settle_ms`, default 2000) for `finish`/`error`/`time.completed` to appear before judging, and a turn whose finish reason never appears is **left alone** unless it has an unresolved tool call. `continue_on_missing_finish: true` restores the old behaviour.
+  - Assistant messages carrying an `error` are never continued, under any `trigger_policy`.
+  - A user message already queued after the last assistant message (a new or injected turn is starting) now blocks injection.
+  - The event loop awaited the idle handler, so `session.execution.started` could not mark the session busy while a decision was in flight. Handlers are now dispatched without blocking the loop, and busy is re-checked after every await before the prompt is sent.
+  - The in-flight guard covered only the prompt call; it now covers the whole evaluation, so overlapping triggers cannot both inject.
+
+### Added
+
+- `settle_ms` and `continue_on_missing_finish` options.
+- A `finish=stop` turn that produced no text and no tool call is now treated as a stall (an empty completion is not a deliberate end of work).
+- Skip log record `skip: last assistant turn is not a stall` now carries a `reason`; new records for pending user messages.
+- Tests 16-25 covering the above; existing tests now use realistic chronological message order.
+
 ## [0.4.0] - 2026-10-02
 
 ### Fixed
@@ -21,6 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The plugin no longer needs `node_modules` to load.** `@opencode/plugin` was imported as a value for `Plugin.define`, which is only `(plugin) => plugin`, but that pulled its whole runtime closure (effect, zod, ai-sdk, …) into every checkout. `dist/` now imports nothing outside Node's own `fs`/`os`/`path`, and `npm run build:lean` builds and then removes `node_modules` for a lean plugin directory.
 - Failures previously swallowed by empty `catch` blocks are now logged (`session.context failed`, `switchAgent`/`switchModel failed`, `injection failed`, and event-subscription death).
 - README documents all options, their precedence, reload behaviour, validation rules, and log file resolution.
 

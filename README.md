@@ -12,7 +12,7 @@ This plugin is not published to any package registry. Get a copy from git, build
 
 ```bash
 git clone https://github.com/AntaniTechnologies/opencode2-autocontinue.git
-cd opencode-auto-continue
+cd opencode2-autocontinue
 ```
 
 ### 2. Install dependencies and build
@@ -24,6 +24,10 @@ npm install
 npm run build
 ```
 
+`dist/` is self-contained: the built plugin imports nothing outside Node's own `fs`/`os`/`path`, so OpenCode can load it with no `node_modules` present. 
+
+**If you want a lean checkout**, `npm run build:lean` builds and then deletes `node_modules` — you will need `npm install` again before the next build, test or typecheck.
+
 ### 3. Register it in `opencode.json(c)`
 
 Add the checkout path to `plugins`. Use an absolute path, or a path relative to the config file:
@@ -33,7 +37,7 @@ Add the checkout path to `plugins`. Use an absolute path, or a path relative to 
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
     {
-      "package": "C:/path/to/opencode-auto-continue",
+      "package": "C:/path/to/opencode2-autocontinue",
       "options": { "enabled": true }
     }
   ]
@@ -114,7 +118,7 @@ Earlier versions triggered on `session.idle`. In practice that event does not re
 | `tool-calls` | tool work still queued | **yes** |
 | `content-filter` / `error` | blocked or failed | no |
 
-`length` is the signature of the stall this plugin exists to catch: your `lejohn` provider is configured with `"output": 8192`, so a long turn that gets truncated still reports success. An absent finish reason is treated as unfinished, so a provider that omits it does not silently disable recovery.
+`length` is the signature of the stall this plugin exists to catch: your `lejohn` provider is configured with `"output": 8192`, so a long turn that gets truncated still reports success. A message with **no** finish reason is not assumed to be a stall: the plugin first waits up to `settle_ms` for the host to write it (the execution event can arrive before the message is fully recorded), and if it still never appears the turn is continued only when a tool call was left unresolved. Set `continue_on_missing_finish: true` for providers that never report one. Messages carrying an `error` are never continued, and neither is a session that already has a user message queued after the last assistant reply. A `stop` that produced no text and no tool call is treated as a stall.
 
 Known blind spot: a stall where the model emits a clean `stop` while work remains is indistinguishable from finishing, and will not be continued. Set `trigger_policy: "always"` if you would rather have full recall and accept the extra round-trips.
 
@@ -129,7 +133,7 @@ Known blind spot: a stall where the model emits a clean `stop` while work remain
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
     {
-      "package": "C:/path/to/opencode-auto-continue",
+      "package": "C:/path/to/opencode2-autocontinue",
       "options": {
         "enabled": true,
         "trigger_policy": "unfinished",
@@ -175,6 +179,8 @@ grep '"msg":"plugin loaded"' ~/.local/share/opencode/log/auto-continue.log | tai
 | `cooldown_ms` | `number` | `10000` | live | Minimum ms between consecutive injections. A trigger inside the window is deferred, not dropped. |
 | `max_consecutive` | `number` | `5` | live | Max consecutive auto-continues before the plugin stops until the counter resets. |
 | `trigger_policy` | `"unfinished"` \| `"always"` | `"unfinished"` | live | `"unfinished"` continues only turns whose finish reason looks cut short; `"always"` continues after every completed turn. See [below](#distinguishing-a-stall-from-finished-work). |
+| `settle_ms` | `number` | `2000` | live | Max time to wait for the last assistant message to receive its finish reason before judging it. |
+| `continue_on_missing_finish` | `boolean` | `false` | live | Continue even when no finish reason ever appears and nothing else proves a stall. |
 | `log_level` | `"debug"` \| `"info"` \| `"warn"` \| `"error"` \| `"off"` | `"info"` | **restart** | Verbosity. `"debug"` also records every ignored event. `"off"` writes nothing at all. |
 | `log_path` | `string` | see [log resolution](#log-file-resolution) | **restart** | Log file path. Relative paths resolve against the project directory. |
 | `log_console` | `boolean` | `false` | **restart** | Also echo records to the plugin process's stderr. |
@@ -236,7 +242,8 @@ Every path that does *not* inject logs a `"skip: ..."` record naming the reason,
 | `skip: no assistant message in context` | The session has no assistant reply to continue past |
 | `skip: already continued past this assistant message` | Duplicate suppression; the last assistant message is unchanged |
 | `skip: session became busy again before injection` | The session restarted work during the race window |
-| `skip: last assistant turn looks finished` | The turn ended in a clean `stop`; nothing was stalled |
+| `skip: last assistant turn is not a stall` | The turn finished normally, errored, or lacks proof of a stall; `reason` says which |
+| `skip: user message is already waiting after the last assistant message` | A turn is already queued, so the session is not stalled |
 | `skip: session belongs to another project` | Every plugin instance sees every session; this one is not yours |
 | `within cooldown, deferring injection` | Deferred by `deferMs`; the follow-up records `trigger: "cooldown-deferred"` |
 

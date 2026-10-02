@@ -2,9 +2,7 @@
 
 An OpenCode 2 plugin that automatically sends a continuation prompt when an agent session finishes a turn without completing its work, keeping long-running tasks moving without manual intervention.
 
-Inspired by [opencode-auto-continue](https://github.com/hjzccc/opencode-auto-continue), an Opencode 1.x plugin by [hjzccc](https://github.com/hjzccc).
-
-> This plugin is designed exclusively for OpenCode 2.x.
+> This plugin is designed specifically for OpenCode 2.x.
 
 ## Install
 
@@ -26,7 +24,7 @@ npm install
 npm run build
 ```
 
-`dist/` is self-contained: the built plugin imports nothing outside Node's own `fs`/`os`/`path`, so OpenCode can load it with no `node_modules` present. 
+`dist/` is self-contained: the built plugin imports nothing outside Node's own `fs`/`os`/`path`, so OpenCode can load it with no `node_modules` present.
 
 **If you want a lean checkout**, `npm run build:lean` builds and then deletes `node_modules` — you will need `npm install` again before the next build, test or typecheck.
 

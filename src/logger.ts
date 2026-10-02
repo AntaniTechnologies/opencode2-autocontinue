@@ -31,7 +31,7 @@ export type LoggerOptions = {
   /** Stable project id, when the host exposes one. */
   projectId?: string
   level: LogLevel
-  /** Explicit log file path from plugin options or `.opencode/auto-continue.json`. */
+  /** Explicit log file path from plugin options or `.opencode/opencode2-autocontinue.json`. */
   file?: string
   /** Also echo records to stderr. Off by default: the host does not route
    * plugin stderr into its own log, so this only helps when something else is
@@ -41,7 +41,10 @@ export type LoggerOptions = {
   maxBytes: number
 }
 
-export const DEFAULT_LOG_FILENAME = "auto-continue.log"
+export const DEFAULT_LOG_FILENAME = "opencode2-autocontinue.log"
+
+/** Pre-rename log filename, still honored when the new one is absent. */
+export const LEGACY_LOG_FILENAME = "auto-continue.log"
 
 export function isLogLevel(value: unknown): value is LogLevel {
   return typeof value === "string" && value in LEVEL_RANK
@@ -58,7 +61,7 @@ function normalizeMaxBytes(value: unknown): number {
 /**
  * Records land next to the host's own log when that location can be derived, so
  * they sit alongside the rest of the session history instead of inside the
- * project repo. A project-local `.opencode/auto-continue.log`, when it exists,
+ * project repo. A project-local `.opencode/opencode2-autocontinue.log`, when it exists,
  * wins over this; see resolveConfig.
  */
 export function defaultLogPath(): string {
@@ -121,7 +124,7 @@ function build(
     }
     if (toConsole) {
       try {
-        process.stderr.write(`[auto-continue] ${line}\n`)
+        process.stderr.write(`[opencode2-autocontinue] ${line}\n`)
       } catch {
         // Ignore console write failures.
       }
@@ -151,7 +154,7 @@ export function createLogger(options: LoggerOptions): Logger {
   }
 
   return build(target, rank, options.console, normalizeMaxBytes(options.maxBytes), {
-    plugin: "auto-continue",
+    plugin: "opencode2-autocontinue",
     project: options.directory,
     ...(options.projectId ? { projectId: options.projectId } : {}),
   })

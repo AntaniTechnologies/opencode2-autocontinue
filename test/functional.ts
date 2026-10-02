@@ -31,7 +31,7 @@ function makeCtx(directory: string, messages: Array<Record<string, unknown>>, op
   // Keep test output readable and stop tests from writing into the real log.
   const opts: Record<string, unknown> = {
     log_console: false,
-    log_path: join(directory, "auto-continue.log"),
+    log_path: join(directory, "opencode2-autocontinue.log"),
     ...options,
   }
 
@@ -104,11 +104,11 @@ function makeCtx(directory: string, messages: Array<Record<string, unknown>>, op
 
 const enabledDir = mkdtempSync(join(tmpdir(), "ac-on-"))
 mkdirSync(join(enabledDir, ".opencode"), { recursive: true })
-writeFileSync(join(enabledDir, ".opencode", "auto-continue.json"), JSON.stringify({ enabled: true }))
+writeFileSync(join(enabledDir, ".opencode", "opencode2-autocontinue.json"), JSON.stringify({ enabled: true }))
 
 const disabledDir = mkdtempSync(join(tmpdir(), "ac-off-"))
 mkdirSync(join(disabledDir, ".opencode"), { recursive: true })
-writeFileSync(join(disabledDir, ".opencode", "auto-continue.json"), JSON.stringify({ enabled: false }))
+writeFileSync(join(disabledDir, ".opencode", "opencode2-autocontinue.json"), JSON.stringify({ enabled: false }))
 
 const plugin = (await import("../dist/index.js")).default
 const tick = () => new Promise((r) => setTimeout(r, 250))
@@ -208,7 +208,7 @@ console.log("case 6: max_consecutive cap -> expect injection to stop at cap")
   const dir3 = mkdtempSync(join(tmpdir(), "ac-cap-"))
   mkdirSync(join(dir3, ".opencode"), { recursive: true })
   writeFileSync(
-    join(dir3, ".opencode", "auto-continue.json"),
+    join(dir3, ".opencode", "opencode2-autocontinue.json"),
     JSON.stringify({ enabled: true, cooldown_ms: 0, max_consecutive: 2 }),
   )
   const h = makeCtx(dir3, makeMessages(true, "go"), {})
@@ -241,7 +241,7 @@ console.log("case 7: logging records project, session, and injection -> expect r
   const dir4 = mkdtempSync(join(tmpdir(), "ac-log-"))
   mkdirSync(join(dir4, ".opencode"), { recursive: true })
   writeFileSync(
-    join(dir4, ".opencode", "auto-continue.json"),
+    join(dir4, ".opencode", "opencode2-autocontinue.json"),
     JSON.stringify({ enabled: true, cooldown_ms: 0, log_level: "debug" }),
   )
   const h = makeCtx(dir4, makeMessages(true, "go"), {})
@@ -254,7 +254,7 @@ console.log("case 7: logging records project, session, and injection -> expect r
   await tick()
   await cleanup?.()
 
-  const logFile = join(dir4, "auto-continue.log")
+  const logFile = join(dir4, "opencode2-autocontinue.log")
   const lines = existsSync(logFile)
     ? readFileSync(logFile, "utf-8").trim().split("\n").map((l) => JSON.parse(l))
     : []
@@ -276,7 +276,7 @@ console.log("case 8: log_level off -> expect no log file written")
   const dir5 = mkdtempSync(join(tmpdir(), "ac-quiet-"))
   mkdirSync(join(dir5, ".opencode"), { recursive: true })
   writeFileSync(
-    join(dir5, ".opencode", "auto-continue.json"),
+    join(dir5, ".opencode", "opencode2-autocontinue.json"),
     JSON.stringify({ enabled: true, cooldown_ms: 0, log_level: "off" }),
   )
   const h = makeCtx(dir5, makeMessages(true, "go"), {})
@@ -285,7 +285,7 @@ console.log("case 8: log_level off -> expect no log file written")
   await tick()
   await cleanup?.()
   check("injection still happens while logging is off", prompts.length, 1)
-  check("no log file", existsSync(join(dir5, "auto-continue.log")), false)
+  check("no log file", existsSync(join(dir5, "opencode2-autocontinue.log")), false)
 }
 
 console.log("case 9: execution.succeeded alone -> expect injection (the session.idle regression)")
@@ -294,7 +294,7 @@ console.log("case 9: execution.succeeded alone -> expect injection (the session.
   const dir6 = mkdtempSync(join(tmpdir(), "ac-exec-"))
   mkdirSync(join(dir6, ".opencode"), { recursive: true })
   writeFileSync(
-    join(dir6, ".opencode", "auto-continue.json"),
+    join(dir6, ".opencode", "opencode2-autocontinue.json"),
     JSON.stringify({ enabled: true, cooldown_ms: 0 }),
   )
   const h = makeCtx(dir6, makeMessages(true, "go"), {})
@@ -316,7 +316,7 @@ console.log("case 10: execution.failed / interrupted -> expect no injection")
   const dir7 = mkdtempSync(join(tmpdir(), "ac-fail-"))
   mkdirSync(join(dir7, ".opencode"), { recursive: true })
   writeFileSync(
-    join(dir7, ".opencode", "auto-continue.json"),
+    join(dir7, ".opencode", "opencode2-autocontinue.json"),
     JSON.stringify({ enabled: true, cooldown_ms: 0 }),
   )
   const h = makeCtx(dir7, makeMessages(true, "go"), {})
@@ -337,7 +337,7 @@ console.log("case 11: session from another project -> expect no injection")
   const dir8 = mkdtempSync(join(tmpdir(), "ac-owner-"))
   mkdirSync(join(dir8, ".opencode"), { recursive: true })
   writeFileSync(
-    join(dir8, ".opencode", "auto-continue.json"),
+    join(dir8, ".opencode", "opencode2-autocontinue.json"),
     JSON.stringify({ enabled: true, cooldown_ms: 0 }),
   )
   const h = makeCtx(dir8, makeMessages(true, "go"), {})
@@ -364,7 +364,7 @@ console.log("case 12: finish=stop -> expect NO injection (task completed normall
   const dir9 = mkdtempSync(join(tmpdir(), "ac-stop-"))
   mkdirSync(join(dir9, ".opencode"), { recursive: true })
   writeFileSync(
-    join(dir9, ".opencode", "auto-continue.json"),
+    join(dir9, ".opencode", "opencode2-autocontinue.json"),
     JSON.stringify({ enabled: true, cooldown_ms: 0 }),
   )
   const h = makeCtx(dir9, makeMessages(true, "go", "stop"), {})
@@ -384,7 +384,7 @@ console.log("case 13: finish=length -> expect injection (stalled on token cap)")
   const dir10 = mkdtempSync(join(tmpdir(), "ac-len-"))
   mkdirSync(join(dir10, ".opencode"), { recursive: true })
   writeFileSync(
-    join(dir10, ".opencode", "auto-continue.json"),
+    join(dir10, ".opencode", "opencode2-autocontinue.json"),
     JSON.stringify({ enabled: true, cooldown_ms: 0 }),
   )
   const h = makeCtx(dir10, makeMessages(true, "go", "length"), {})
@@ -396,7 +396,7 @@ console.log("case 13: finish=length -> expect injection (stalled on token cap)")
   await tick()
   check("injections", prompts.length, 1)
 
-  const logFile = join(dir10, "auto-continue.log")
+  const logFile = join(dir10, "opencode2-autocontinue.log")
   const lines = readFileSync(logFile, "utf-8").trim().split("\n").map((l) => JSON.parse(l))
   const rec = lines.find((l) => l.msg === "injecting continuation")
   check("finish logged", rec?.finish, "length")
@@ -410,7 +410,7 @@ console.log("case 14: trigger_policy=always -> expect injection even on finish=s
   const dir11 = mkdtempSync(join(tmpdir(), "ac-always-"))
   mkdirSync(join(dir11, ".opencode"), { recursive: true })
   writeFileSync(
-    join(dir11, ".opencode", "auto-continue.json"),
+    join(dir11, ".opencode", "opencode2-autocontinue.json"),
     JSON.stringify({ enabled: true, cooldown_ms: 0, trigger_policy: "always" }),
   )
   const h = makeCtx(dir11, makeMessages(true, "go", "stop"), {})
@@ -429,7 +429,7 @@ console.log("case 15: invalid option value must not clobber the project file")
   const dir12 = mkdtempSync(join(tmpdir(), "ac-precedence-"))
   mkdirSync(join(dir12, ".opencode"), { recursive: true })
   writeFileSync(
-    join(dir12, ".opencode", "auto-continue.json"),
+    join(dir12, ".opencode", "opencode2-autocontinue.json"),
     JSON.stringify({ enabled: true, trigger_policy: "always" }),
   )
   // A bad value in the higher-precedence layer must be ignored outright, not
@@ -455,7 +455,7 @@ console.log("case 15: invalid option value must not clobber the project file")
 function mkDir(cfg: Record<string, unknown>, tag: string) {
   const d = mkdtempSync(join(tmpdir(), `ac-${tag}-`))
   mkdirSync(join(d, ".opencode"), { recursive: true })
-  writeFileSync(join(d, ".opencode", "auto-continue.json"), JSON.stringify({ enabled: true, cooldown_ms: 0, ...cfg }))
+  writeFileSync(join(d, ".opencode", "opencode2-autocontinue.json"), JSON.stringify({ enabled: true, cooldown_ms: 0, ...cfg }))
   return d
 }
 async function runTurn(dir: string, messages: any, sid: string, wait = 600, mutate?: (h: any) => void) {
@@ -559,6 +559,21 @@ console.log("case 25: session goes busy during the settle wait -> expect NO inje
   await new Promise((r) => setTimeout(r, 1000))
   await cleanup?.()
   check("injections", prompts.length, 0)
+}
+
+console.log("case 26: legacy auto-continue.json config is still honored, new name wins")
+{
+  reset()
+  const d = mkdtempSync(join(tmpdir(), "ac-legacy-"))
+  mkdirSync(join(d, ".opencode"), { recursive: true })
+  writeFileSync(join(d, ".opencode", "auto-continue.json"), JSON.stringify({ enabled: true }))
+  const { resolveConfig } = await import("../dist/config.js")
+  const r = resolveConfig(d, {})
+  check("legacy config enables plugin", r.config.enabled, true)
+  check("legacy config file detected", r.configFile?.endsWith("auto-continue.json"), true)
+  writeFileSync(join(d, ".opencode", "opencode2-autocontinue.json"), JSON.stringify({ enabled: false }))
+  const r2 = resolveConfig(d, {})
+  check("new config name wins over legacy", r2.config.enabled, false)
 }
 
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`)

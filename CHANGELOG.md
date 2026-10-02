@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] - 2026-10-02
+
+### Changed
+
+- Runtime identifiers now present as `opencode2-autocontinue`: plugin `id`, log `plugin` field and console prefix, default log file `opencode2-autocontinue.log`, and project config file `opencode2-autocontinue.json(c)`. The legacy project config `auto-continue.json(c)` — and an existing project-local `auto-continue.log` — is still honored when the new name is absent.
+
 ## [0.4.2] - 2026-10-02
 
 ### Fixed

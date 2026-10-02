@@ -1,6 +1,6 @@
 {
   "name": "opencode2-autocontinue",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "OpenCode plugin that automatically continues stalled agent sessions",
   "type": "module",
   "main": "dist/index.js",

@@ -11,14 +11,14 @@ import { createLogger, type Logger } from "./logger.js"
 // plugin runs with no node_modules at all. If a future @opencode/plugin makes
 // `define` do real work, this needs revisiting.
 const plugin = {
-  id: "auto-continue",
+  id: "opencode2-autocontinue",
   setup(ctx: Plugin.Context) {
     const sessionStateStore = createSessionStateStore()
 
     const getResolved = () => resolveConfig(ctx.location.directory, ctx.options)
     const getConfig = () => getResolved().config
 
-    // Config is re-read on every event so edits to .opencode/auto-continue.json
+    // Config is re-read on every event so edits to .opencode/opencode2-autocontinue.json
     // take effect without a restart. Logging settings are sampled once, at
     // startup, because the logger owns a file handle.
     const initial = getResolved()
@@ -60,7 +60,7 @@ const plugin = {
       })
     }
     if (!initial.config.enabled) {
-      logger.warn("plugin is disabled; set enabled: true to activate auto-continue")
+      logger.warn("plugin is disabled; set enabled: true to activate opencode2-autocontinue")
     }
 
     const controller = new AbortController()
@@ -132,9 +132,9 @@ const plugin = {
         }
       } catch (error) {
         // Aborted on unload is the expected path; anything else means the
-        // subscription died and auto-continue is now inert.
+        // subscription died and opencode2-autocontinue is now inert.
         if (!controller.signal.aborted) {
-          logger.error("event subscription failed, auto-continue is no longer running", { error })
+          logger.error("event subscription failed, opencode2-autocontinue is no longer running", { error })
         }
       }
     })()

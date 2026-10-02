@@ -1,9 +1,16 @@
 import { existsSync, readFileSync } from "fs"
 import { isAbsolute, join, resolve } from "path"
 import { type PluginConfig, type TriggerPolicy, DEFAULT_CONFIG } from "./types.js"
-import { DEFAULT_LOG_FILENAME, isLogLevel, normalizeLogLevel } from "./logger.js"
+import { DEFAULT_LOG_FILENAME, LEGACY_LOG_FILENAME, isLogLevel, normalizeLogLevel } from "./logger.js"
 
-const CONFIG_FILENAMES = ["auto-continue.json", "auto-continue.jsonc"]
+// New names first; legacy pre-rename names are still honored so existing
+// checkouts keep working without any change.
+const CONFIG_FILENAMES = [
+  "opencode2-autocontinue.json",
+  "opencode2-autocontinue.jsonc",
+  "auto-continue.json",
+  "auto-continue.jsonc",
+]
 
 function normalizeTriggerPolicy(value: unknown, fallback: TriggerPolicy): TriggerPolicy {
   return value === "always" || value === "unfinished" ? value : fallback
@@ -18,7 +25,7 @@ export type ConfigSource = "options" | "file" | "default"
 
 export type ResolvedConfig = {
   config: PluginConfig
-  /** The `.opencode/auto-continue.json(c)` that was read, if any. */
+  /** The `.opencode/opencode2-autocontinue.json(c)` that was read, if any. */
   configFile: string | null
   sources: Record<keyof PluginConfig, ConfigSource>
   /** Set when the config file existed but could not be parsed. */
@@ -47,7 +54,10 @@ function parseConfigFile(filePath: string): Partial<PluginConfig> {
  */
 function findLocalLogFile(directory: string): string | undefined {
   const candidate = join(directory, ".opencode", DEFAULT_LOG_FILENAME)
-  return existsSync(candidate) ? candidate : undefined
+  if (existsSync(candidate)) return candidate
+  // Pre-rename log, honored so an existing repo keeps its own history.
+  const legacy = join(directory, ".opencode", LEGACY_LOG_FILENAME)
+  return existsSync(legacy) ? legacy : undefined
 }
 
 function normalizeOptions(options?: { readonly [key: string]: unknown }): Partial<PluginConfig> {

@@ -1,7 +1,7 @@
 {
   "name": "opencode-auto-continue",
-  "version": "0.2.1",
-  "description": "OpenCode plugin that automatically sends a continuation prompt when sessions go idle",
+  "version": "0.4.0",
+  "description": "OpenCode plugin that automatically continues stalled agent sessions",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

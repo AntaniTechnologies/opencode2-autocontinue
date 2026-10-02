@@ -1,11 +1,11 @@
-import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs"
+import { mkdtempSync, writeFileSync, mkdirSync, existsSync, readFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 const calls: string[] = []
 let prompts: Array<Record<string, unknown>> = []
 
-function makeMessages(withAssistant: boolean, lastUserText: string) {
+function makeMessages(withAssistant: boolean, lastUserText: string, finish?: string) {
   const msgs: Array<Record<string, unknown>> = []
   if (withAssistant) {
     msgs.push({
@@ -14,6 +14,7 @@ function makeMessages(withAssistant: boolean, lastUserText: string) {
       agent: "build",
       model: { providerID: "anthropic", id: "claude-sonnet-4-5" },
       content: [{ type: "text", text: "done" }],
+      ...(finish ? { finish } : {}),
     })
   }
   msgs.push({ type: "user", id: "msg_user_1", text: lastUserText })
@@ -25,10 +26,23 @@ function makeCtx(directory: string, messages: Array<Record<string, unknown>>, op
   const controller = new AbortController()
   let notify: (() => void) | undefined
 
+  // Keep test output readable and stop tests from writing into the real log.
+  const opts: Record<string, unknown> = {
+    log_console: false,
+    log_path: join(directory, "auto-continue.log"),
+    ...options,
+  }
+
   const session: any = {
     async context() {
       calls.push("session.context")
       return messages
+    },
+    // Sessions carry the directory they belong to; the handler uses it to
+    // avoid injecting into another project's session.
+    async get(i: any) {
+      calls.push(`session.get:${i.sessionID}`)
+      return { id: i.sessionID, projectID: "p", location: { directory } }
     },
     async switchAgent(i: any) {
       calls.push(`switchAgent:${i.agent}`)
@@ -46,7 +60,7 @@ function makeCtx(directory: string, messages: Array<Record<string, unknown>>, op
   const ctx: any = {
     app: { version: "2.0.22" },
     location: { directory, project: { id: "p", directory, canonical: directory } },
-    options,
+    options: opts,
     session,
     event: {
       subscribe() {
@@ -214,6 +228,222 @@ console.log("case 6: max_consecutive cap -> expect injection to stop at cap")
   }
   check("injections with max_consecutive=2", prompts.length, 2)
   await cleanup?.()
+}
+
+console.log("case 7: logging records project, session, and injection -> expect readable log lines")
+{
+  reset()
+  const dir4 = mkdtempSync(join(tmpdir(), "ac-log-"))
+  mkdirSync(join(dir4, ".opencode"), { recursive: true })
+  writeFileSync(
+    join(dir4, ".opencode", "auto-continue.json"),
+    JSON.stringify({ enabled: true, cooldown_ms: 0, log_level: "debug" }),
+  )
+  const h = makeCtx(dir4, makeMessages(true, "go"), {})
+  const cleanup = await plugin.setup(h.ctx)
+  h.push(
+    { type: "session.execution.started", data: { sessionID: "ses_7" } },
+    { type: "session.execution.succeeded", data: { sessionID: "ses_7" } },
+    { type: "session.idle", data: { sessionID: "ses_7" } },
+  )
+  await tick()
+  await cleanup?.()
+
+  const logFile = join(dir4, "auto-continue.log")
+  const lines = existsSync(logFile)
+    ? readFileSync(logFile, "utf-8").trim().split("\n").map((l) => JSON.parse(l))
+    : []
+  check("log file created", existsSync(logFile), true)
+  check("every line is JSON", lines.every((l) => typeof l.msg === "string"), true)
+  check("lines carry the project directory", lines.every((l) => l.project === dir4), true)
+
+  const injected = lines.find((l) => l.msg === "continuation injected")
+  check("injection logged", injected !== undefined, true)
+  check("injection records sessionID", injected?.sessionID, "ses_7")
+  check("injection records consecutive count", injected?.consecutiveCount, 1)
+  check("injection records trigger on the preceding record", lines.find((l) => l.msg === "injecting continuation")?.trigger, "session.execution.succeeded")
+  check("startup records the resolved log file", lines[0]?.logFile, logFile)
+}
+
+console.log("case 8: log_level off -> expect no log file written")
+{
+  reset()
+  const dir5 = mkdtempSync(join(tmpdir(), "ac-quiet-"))
+  mkdirSync(join(dir5, ".opencode"), { recursive: true })
+  writeFileSync(
+    join(dir5, ".opencode", "auto-continue.json"),
+    JSON.stringify({ enabled: true, cooldown_ms: 0, log_level: "off" }),
+  )
+  const h = makeCtx(dir5, makeMessages(true, "go"), {})
+  const cleanup = await plugin.setup(h.ctx)
+  h.push({ type: "session.idle", data: { sessionID: "ses_8" } })
+  await tick()
+  await cleanup?.()
+  check("injection still happens while logging is off", prompts.length, 1)
+  check("no log file", existsSync(join(dir5, "auto-continue.log")), false)
+}
+
+console.log("case 9: execution.succeeded alone -> expect injection (the session.idle regression)")
+{
+  reset()
+  const dir6 = mkdtempSync(join(tmpdir(), "ac-exec-"))
+  mkdirSync(join(dir6, ".opencode"), { recursive: true })
+  writeFileSync(
+    join(dir6, ".opencode", "auto-continue.json"),
+    JSON.stringify({ enabled: true, cooldown_ms: 0 }),
+  )
+  const h = makeCtx(dir6, makeMessages(true, "go"), {})
+  const cleanup = await plugin.setup(h.ctx)
+  // No session.idle at all: this is exactly what a live stalled session did.
+  h.push(
+    { type: "session.execution.started", data: { sessionID: "ses_9" } },
+    { type: "session.execution.succeeded", data: { sessionID: "ses_9" } },
+  )
+  await tick()
+  check("injections", prompts.length, 1)
+  check("prompt text", prompts[0]?.text, "continue")
+  await cleanup?.()
+}
+
+console.log("case 10: execution.failed / interrupted -> expect no injection")
+{
+  reset()
+  const dir7 = mkdtempSync(join(tmpdir(), "ac-fail-"))
+  mkdirSync(join(dir7, ".opencode"), { recursive: true })
+  writeFileSync(
+    join(dir7, ".opencode", "auto-continue.json"),
+    JSON.stringify({ enabled: true, cooldown_ms: 0 }),
+  )
+  const h = makeCtx(dir7, makeMessages(true, "go"), {})
+  const cleanup = await plugin.setup(h.ctx)
+  h.push(
+    { type: "session.execution.started", data: { sessionID: "ses_10" } },
+    { type: "session.execution.failed", data: { sessionID: "ses_10" } },
+    { type: "session.execution.interrupted", data: { sessionID: "ses_11" } },
+  )
+  await tick()
+  check("injections", prompts.length, 0)
+  await cleanup?.()
+}
+
+console.log("case 11: session from another project -> expect no injection")
+{
+  reset()
+  const dir8 = mkdtempSync(join(tmpdir(), "ac-owner-"))
+  mkdirSync(join(dir8, ".opencode"), { recursive: true })
+  writeFileSync(
+    join(dir8, ".opencode", "auto-continue.json"),
+    JSON.stringify({ enabled: true, cooldown_ms: 0 }),
+  )
+  const h = makeCtx(dir8, makeMessages(true, "go"), {})
+  // Every plugin instance sees every session, so a session living in another
+  // directory must be ignored rather than continued by this instance.
+  h.session.get = async (i: any) => ({
+    id: i.sessionID,
+    projectID: "other",
+    location: { directory: "C:\\somewhere\\else" },
+  })
+  const cleanup = await plugin.setup(h.ctx)
+  h.push(
+    { type: "session.execution.started", data: { sessionID: "ses_12" } },
+    { type: "session.execution.succeeded", data: { sessionID: "ses_12" } },
+  )
+  await tick()
+  check("injections", prompts.length, 0)
+  await cleanup?.()
+}
+
+console.log("case 12: finish=stop -> expect NO injection (task completed normally)")
+{
+  reset()
+  const dir9 = mkdtempSync(join(tmpdir(), "ac-stop-"))
+  mkdirSync(join(dir9, ".opencode"), { recursive: true })
+  writeFileSync(
+    join(dir9, ".opencode", "auto-continue.json"),
+    JSON.stringify({ enabled: true, cooldown_ms: 0 }),
+  )
+  const h = makeCtx(dir9, makeMessages(true, "go", "stop"), {})
+  const cleanup = await plugin.setup(h.ctx)
+  h.push(
+    { type: "session.execution.started", data: { sessionID: "ses_13" } },
+    { type: "session.execution.succeeded", data: { sessionID: "ses_13" } },
+  )
+  await tick()
+  check("injections", prompts.length, 0)
+  await cleanup?.()
+}
+
+console.log("case 13: finish=length -> expect injection (stalled on token cap)")
+{
+  reset()
+  const dir10 = mkdtempSync(join(tmpdir(), "ac-len-"))
+  mkdirSync(join(dir10, ".opencode"), { recursive: true })
+  writeFileSync(
+    join(dir10, ".opencode", "auto-continue.json"),
+    JSON.stringify({ enabled: true, cooldown_ms: 0 }),
+  )
+  const h = makeCtx(dir10, makeMessages(true, "go", "length"), {})
+  const cleanup = await plugin.setup(h.ctx)
+  h.push(
+    { type: "session.execution.started", data: { sessionID: "ses_14" } },
+    { type: "session.execution.succeeded", data: { sessionID: "ses_14" } },
+  )
+  await tick()
+  check("injections", prompts.length, 1)
+
+  const logFile = join(dir10, "auto-continue.log")
+  const lines = readFileSync(logFile, "utf-8").trim().split("\n").map((l) => JSON.parse(l))
+  const rec = lines.find((l) => l.msg === "injecting continuation")
+  check("finish logged", rec?.finish, "length")
+  check("last assistant text logged", rec?.lastAssistantText, "done")
+  await cleanup?.()
+}
+
+console.log("case 14: trigger_policy=always -> expect injection even on finish=stop")
+{
+  reset()
+  const dir11 = mkdtempSync(join(tmpdir(), "ac-always-"))
+  mkdirSync(join(dir11, ".opencode"), { recursive: true })
+  writeFileSync(
+    join(dir11, ".opencode", "auto-continue.json"),
+    JSON.stringify({ enabled: true, cooldown_ms: 0, trigger_policy: "always" }),
+  )
+  const h = makeCtx(dir11, makeMessages(true, "go", "stop"), {})
+  const cleanup = await plugin.setup(h.ctx)
+  h.push(
+    { type: "session.execution.started", data: { sessionID: "ses_15" } },
+    { type: "session.execution.succeeded", data: { sessionID: "ses_15" } },
+  )
+  await tick()
+  check("injections", prompts.length, 1)
+  await cleanup?.()
+}
+
+console.log("case 15: invalid option value must not clobber the project file")
+{
+  const dir12 = mkdtempSync(join(tmpdir(), "ac-precedence-"))
+  mkdirSync(join(dir12, ".opencode"), { recursive: true })
+  writeFileSync(
+    join(dir12, ".opencode", "auto-continue.json"),
+    JSON.stringify({ enabled: true, trigger_policy: "always" }),
+  )
+  // A bad value in the higher-precedence layer must be ignored outright, not
+  // coerced to the default, or it would override the project file.
+  const { resolveConfig } = await import("../dist/config.js")
+  const r = resolveConfig(dir12, { enabled: true, trigger_policy: "sometimes", log_level: "loud" })
+  check("project file policy survives bad option", r.config.trigger_policy, "always")
+  check("policy source", r.sources.trigger_policy, "file")
+  check("bad log_level falls back to default", r.config.log_level, "info")
+
+  // A valid explicit option must still win over the project file.
+  const r2 = resolveConfig(dir12, { enabled: true, trigger_policy: "unfinished" })
+  check("valid option wins over file", r2.config.trigger_policy, "unfinished")
+  check("policy source", r2.sources.trigger_policy, "options")
+
+  // Wrong-typed scalars are ignored rather than coerced.
+  const r3 = resolveConfig(dir12, { enabled: true, cooldown_ms: "fast", message: 5 })
+  check("bad cooldown ignored", r3.config.cooldown_ms, 10000)
+  check("bad message ignored", r3.config.message, "continue")
 }
 
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`)

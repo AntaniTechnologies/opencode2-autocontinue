@@ -149,7 +149,7 @@ Known blind spot: a stall where the model emits a clean `stop` while work remain
 
 ```jsonc
 {
-  "trigger_policy": "always",
+  "trigger_policy": "unfinished",
   "max_consecutive": 3
 }
 ```

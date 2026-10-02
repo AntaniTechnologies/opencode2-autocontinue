@@ -1,44 +1,32 @@
-import type { PluginInput } from "@opencode-ai/plugin"
-import type { PluginConfig } from "./types"
-import type { SessionStateStore } from "./session-state"
+import type { Plugin } from "@opencode/plugin"
+import type { PluginConfig } from "./types.js"
+import type { SessionStateStore } from "./session-state.js"
 
-type EventInput = {
-  event: { type: string; properties?: unknown }
-}
+type Ctx = Plugin.Context
+type SessionMessage = Awaited<ReturnType<Ctx["session"]["context"]>>[number]
 
-type SessionMessage = {
-  info?: {
-    id?: string
-    role?: string
-    agent?: string
-    modelID?: string
-    providerID?: string
-    model?: {
-      providerID?: string
-      modelID?: string
-    }
+export type PluginEvent = {
+  type: string
+  data?: {
+    sessionID?: string
   }
-  parts?: Array<{ type?: string; text?: string }>
 }
 
 type ResolvedContext = {
   messageId: string | undefined
   agent: string | undefined
-  model: { providerID: string; modelID: string } | undefined
+  model: { providerID: string; id: string } | undefined
 }
 
 function resolveLastAssistantContext(messages: SessionMessage[]): ResolvedContext {
   for (let i = messages.length - 1; i >= 0; i--) {
-    const info = messages[i].info
-    if (info?.role !== "assistant") continue
-
-    const providerID = info.model?.providerID ?? info.providerID
-    const modelID = info.model?.modelID ?? info.modelID
+    const msg = messages[i]
+    if (msg.type !== "assistant") continue
 
     return {
-      messageId: info.id,
-      agent: info.agent,
-      model: providerID && modelID ? { providerID, modelID } : undefined,
+      messageId: msg.id,
+      agent: msg.agent,
+      model: msg.model ? { providerID: msg.model.providerID, id: msg.model.id } : undefined,
     }
   }
   return { messageId: undefined, agent: undefined, model: undefined }
@@ -46,8 +34,10 @@ function resolveLastAssistantContext(messages: SessionMessage[]): ResolvedContex
 
 function resolveAgentFromUserMessages(messages: SessionMessage[]): string | undefined {
   for (let i = messages.length - 1; i >= 0; i--) {
-    const info = messages[i].info
-    if (info?.role === "user" && info.agent) return info.agent
+    const msg = messages[i]
+    if (msg.type !== "user") continue
+    const agents = msg.agents ?? []
+    if (agents.length > 0) return agents[agents.length - 1].name
   }
   return undefined
 }
@@ -58,46 +48,22 @@ function hasRealUserMessageAfterLastContinue(
 ): boolean {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i]
-    if (msg.info?.role !== "user") continue
+    if (msg.type !== "user") continue
 
-    const text = (msg.parts ?? [])
-      .filter((p) => p.type === "text" && typeof p.text === "string")
-      .map((p) => p.text?.trim() ?? "")
-      .join("")
-      .toLowerCase()
-
+    const text = (msg.text ?? "").trim().toLowerCase()
     if (text === continueText.toLowerCase()) return false
     return true
   }
   return false
 }
 
-type SessionStatusEntry = { type?: string }
-
-async function isSessionIdle(
-  ctx: PluginInput,
-  sessionID: string,
-): Promise<boolean> {
-  try {
-    const response = await ctx.client.session.status({
-      query: { directory: ctx.directory },
-    })
-    const map = ((response as { data?: unknown })?.data ?? response ?? {}) as Record<
-      string,
-      SessionStatusEntry
-    >
-    return !map[sessionID]
-  } catch {
-    return true
-  }
-}
-
 export function createIdleHandler(args: {
-  ctx: PluginInput
+  ctx: Ctx
   getConfig: () => PluginConfig
   sessionStateStore: SessionStateStore
-}): (input: EventInput) => Promise<void> {
-  const { ctx, getConfig, sessionStateStore } = args
+  isBusy: (sessionID: string) => boolean
+}): (event: PluginEvent) => Promise<void> {
+  const { ctx, getConfig, sessionStateStore, isBusy } = args
 
   async function injectContinuation(sessionID: string): Promise<void> {
     const config = getConfig()
@@ -108,13 +74,9 @@ export function createIdleHandler(args: {
     if (state.inFlight) return
     if (state.consecutiveCount >= config.max_consecutive) return
 
-    let messages: SessionMessage[] = []
+    let messages: SessionMessage[]
     try {
-      const response = await ctx.client.session.messages({
-        path: { id: sessionID },
-        query: { directory: ctx.directory },
-      })
-      messages = (response?.data ?? response ?? []) as SessionMessage[]
+      messages = [...(await ctx.session.context({ sessionID }))]
     } catch {
       return
     }
@@ -130,25 +92,26 @@ export function createIdleHandler(args: {
 
     const agent = assistantCtx.agent ?? resolveAgentFromUserMessages(messages)
 
-    if (!(await isSessionIdle(ctx, sessionID))) return
+    // V2 has no session.status/active API on the plugin context, so the busy
+    // set maintained from execution events is the idleness signal. This closes
+    // the race window opened by cooldown deferral.
+    if (isBusy(sessionID)) return
 
     state.inFlight = true
     try {
-      const payload = {
-        path: { id: sessionID },
-        body: {
-          ...(agent ? { agent } : {}),
-          ...(assistantCtx.model ? { model: assistantCtx.model } : {}),
-          parts: [{ type: "text" as const, text: config.message }],
-        },
-        query: { directory: ctx.directory },
+      if (agent) {
+        try {
+          await ctx.session.switchAgent({ sessionID, agent })
+        } catch {
+        }
       }
-
-      if (typeof (ctx.client.session as any).promptAsync === "function") {
-        await (ctx.client.session as any).promptAsync(payload)
-      } else {
-        await ctx.client.session.prompt(payload)
+      if (assistantCtx.model) {
+        try {
+          await ctx.session.switchModel({ sessionID, model: assistantCtx.model })
+        } catch {
+        }
       }
+      await ctx.session.prompt({ sessionID, text: config.message })
 
       state.lastAssistantMessageId = assistantCtx.messageId
       state.consecutiveCount += 1
@@ -159,11 +122,10 @@ export function createIdleHandler(args: {
     }
   }
 
-  return async ({ event }: EventInput): Promise<void> => {
+  return async (event: PluginEvent): Promise<void> => {
     if (event.type === "session.deleted") {
-      const props = event.properties as Record<string, unknown> | undefined
-      const info = props?.info as { id?: string } | undefined
-      if (info?.id) sessionStateStore.cleanup(info.id)
+      const sessionID = event.data?.sessionID
+      if (sessionID) sessionStateStore.cleanup(sessionID)
       return
     }
 
@@ -172,8 +134,7 @@ export function createIdleHandler(args: {
     const config = getConfig()
     if (!config.enabled) return
 
-    const props = event.properties as Record<string, unknown> | undefined
-    const sessionID = props?.sessionID as string | undefined
+    const sessionID = event.data?.sessionID
     if (!sessionID) return
 
     const state = sessionStateStore.getState(sessionID)
@@ -187,7 +148,7 @@ export function createIdleHandler(args: {
       const remaining = config.cooldown_ms - (Date.now() - state.lastInjectedAt)
       state.deferredTimer = setTimeout(() => {
         state.deferredTimer = undefined
-        injectContinuation(sessionID)
+        void injectContinuation(sessionID)
       }, remaining)
       return
     }

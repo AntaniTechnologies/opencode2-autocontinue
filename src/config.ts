@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "fs"
 import { join } from "path"
-import { type PluginConfig, DEFAULT_CONFIG } from "./types"
+import { type PluginConfig, DEFAULT_CONFIG } from "./types.js"
 
 const CONFIG_FILENAMES = [
   "auto-continue.json",
@@ -25,19 +25,40 @@ function parseConfigFile(filePath: string): Partial<PluginConfig> {
   return JSON.parse(cleaned) as Partial<PluginConfig>
 }
 
-export function loadConfig(directory: string): PluginConfig {
-  const configPath = findConfigFile(directory)
-  if (!configPath) return { ...DEFAULT_CONFIG }
+function normalizeOptions(options?: { readonly [key: string]: unknown }): Partial<PluginConfig> {
+  if (!options) return {}
+  const out: Partial<PluginConfig> = {}
+  if (typeof options.enabled === "boolean") out.enabled = options.enabled
+  if (typeof options.message === "string") out.message = options.message
+  if (typeof options.cooldown_ms === "number") out.cooldown_ms = options.cooldown_ms
+  if (typeof options.max_consecutive === "number") out.max_consecutive = options.max_consecutive
+  return out
+}
 
-  try {
-    const parsed = parseConfigFile(configPath)
-    return {
-      enabled: parsed.enabled ?? DEFAULT_CONFIG.enabled,
-      message: parsed.message ?? DEFAULT_CONFIG.message,
-      cooldown_ms: parsed.cooldown_ms ?? DEFAULT_CONFIG.cooldown_ms,
-      max_consecutive: parsed.max_consecutive ?? DEFAULT_CONFIG.max_consecutive,
+export function loadConfig(
+  directory: string,
+  options?: { readonly [key: string]: unknown },
+): PluginConfig {
+  let fileConfig: Partial<PluginConfig> = {}
+  const configPath = findConfigFile(directory)
+  if (configPath) {
+    try {
+      fileConfig = parseConfigFile(configPath)
+    } catch {
+      fileConfig = {}
     }
-  } catch {
-    return { ...DEFAULT_CONFIG }
+  }
+
+  const optionOverrides = normalizeOptions(options)
+
+  return {
+    enabled: optionOverrides.enabled ?? fileConfig.enabled ?? DEFAULT_CONFIG.enabled,
+    message: optionOverrides.message ?? fileConfig.message ?? DEFAULT_CONFIG.message,
+    cooldown_ms:
+      optionOverrides.cooldown_ms ?? fileConfig.cooldown_ms ?? DEFAULT_CONFIG.cooldown_ms,
+    max_consecutive:
+      optionOverrides.max_consecutive ??
+      fileConfig.max_consecutive ??
+      DEFAULT_CONFIG.max_consecutive,
   }
 }

@@ -1,4 +1,4 @@
-import type { SessionState } from "./types"
+import type { SessionState } from "./types.js"
 
 export function createSessionStateStore() {
   const states = new Map<string, SessionState>()
@@ -31,7 +31,14 @@ export function createSessionStateStore() {
     }
   }
 
-  return { getState, cleanup, resetConsecutive }
+  function dispose(): void {
+    for (const state of states.values()) {
+      if (state.deferredTimer) clearTimeout(state.deferredTimer)
+    }
+    states.clear()
+  }
+
+  return { getState, cleanup, resetConsecutive, dispose }
 }
 
 export type SessionStateStore = ReturnType<typeof createSessionStateStore>

@@ -1,23 +1,28 @@
 {
   "name": "opencode-auto-continue",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "OpenCode plugin that automatically sends a continuation prompt when sessions go idle",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./server": "./dist/index.js",
+    "./package.json": "./package.json"
+  },
   "files": [
     "dist"
   ],
   "scripts": {
-    "build": "bun build src/index.ts --outdir dist --target bun --format esm && tsc --emitDeclarationOnly",
-    "prepublishOnly": "bun run build",
+    "build": "tsc",
+    "prepublishOnly": "npm run build",
     "typecheck": "tsc --noEmit",
-    "dev": "bun build src/index.ts --outdir dist --target bun --format esm --watch"
+    "dev": "tsc --watch"
   },
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/hjzccc/opencode-auto-continue.git"
+    "url": "git+https://github.com/AntaniTechnologies/opencode2-autocontinue.git"
   },
   "keywords": [
     "opencode",
@@ -25,7 +30,7 @@
     "auto-continue"
   ],
   "dependencies": {
-    "@opencode-ai/plugin": "^1.2.27"
+    "@opencode/plugin": "^2.0.22"
   },
   "devDependencies": {
     "bun-types": "latest",

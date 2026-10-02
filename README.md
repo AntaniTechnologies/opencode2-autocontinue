@@ -1,8 +1,8 @@
-# opencode-auto-continue
+# opencode2-autocontinue
 
-OpenCode plugin that automatically sends a continuation prompt when agent sessions go idle, keeping long-running tasks moving without manual intervention.
+An OpenCode 2 plugin that automatically sends a continuation prompt when agent sessions go idle, keeping long-running tasks moving without manual intervention.
 
-> V2 plugin for OpenCode 2.x. (For OpenCode 1.x, use version 0.1.x.)
+> This plugin is designed specifically for OpenCode 2.x.
 
 ## Install
 
@@ -62,6 +62,20 @@ The root `index.js` shim re-exports `dist/index.js` and does not trigger a build
 
 ```bash
 npm run build && opencode service restart
+```
+
+## Verifying
+
+```bash
+npm test
+```
+
+This drives the real `setup()` with a mock plugin context and real-shaped V2 events, and covers injection on idle, duplicate suppression, the no-assistant-message case, the disabled case, agent/model continuity, and the `max_consecutive` cap.
+
+The tests mock the event stream, so they do not prove a live server emits `session.idle` when you expect. To confirm that end to end, run a real session and watch for an injected `continue` in the transcript, or check the log:
+
+```bash
+grep -a "session.idle" ~/.local/share/opencode/log/opencode.log | tail
 ```
 
 ## How It Works

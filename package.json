@@ -1,6 +1,6 @@
 {
   "name": "opencode-auto-continue",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "OpenCode plugin that automatically sends a continuation prompt when sessions go idle",
   "type": "module",
   "main": "dist/index.js",
@@ -17,7 +17,8 @@
     "build": "tsc",
     "prepublishOnly": "npm run build",
     "typecheck": "tsc --noEmit",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "test": "tsx test/functional.ts"
   },
   "license": "MIT",
   "repository": {
@@ -34,6 +35,7 @@
   },
   "devDependencies": {
     "bun-types": "latest",
-    "typescript": "^5.8.0"
+    "typescript": "^5.8.0",
+    "tsx": "^4.23.15"
   }
 }

@@ -2,6 +2,8 @@
 
 An OpenCode 2 plugin that automatically sends a continuation prompt when an agent session finishes a turn without completing its work, keeping long-running tasks moving without manual intervention.
 
+Inspired by [opencode-auto-continue](https://github.com/hjzccc/opencode-auto-continue), an Opencode 1.x plugin by [hjzccc](https://github.com/hjzccc).
+
 > This plugin is designed specifically for OpenCode 2.x.
 
 ## Install

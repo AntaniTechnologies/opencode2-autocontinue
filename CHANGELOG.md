@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-10-05
+
+### Fixed
+
+- **Sessions stranded by a failed compaction are now recovered.** A compaction summary that returns nothing usable ("Compaction produced no summary") failed the step and ended the turn *without producing an assistant message*, so no finish reason ever existed to judge and the session sat idle indefinitely — while its context stayed over the compaction threshold, so every later turn hit the same wall. Three things had to change:
+  - `session.execution.failed` is no longer discarded outright. It is now a trigger, gated on the event's `error.type` starting with `compaction.`, so provider and tool failures are still never retried blindly. The event is only a pre-filter; the decision is made from session state.
+  - The last failed compaction (`type: "compaction"`, `status: "failed"`) is resolved from the session and judged ahead of the assistant message. Without this the stale pre-compaction reply — normally a clean `stop` — read as "finished, leave it alone".
+  - Recovery is deduplicated on the failed compaction's message id rather than the assistant message id. Keying on the assistant id blocked the retry it was meant to enable, since a summary that fails again emits no new assistant message.
+
+  Only plausibly transient failures are retried: `compaction.failed` with no summary or an unfilled template. Deliberately excluded are `compaction.interrupted` (you pressed Esc), `reason: "manual"` (a `/compact` that already reports its own outcome to you), the output-token-limit and "cannot be reduced further" failures (deterministic, so a retry fails identically), and `provider.unsupported-operation`. Retries remain bounded by `cooldown_ms` and `max_consecutive`. Disable with `continue_on_compaction_failure: false` (default `true`).
+
 ## [0.4.3] - 2026-10-02
 
 ### Changed

@@ -71,6 +71,9 @@ function normalizeOptions(options?: { readonly [key: string]: unknown }): Partia
   if (typeof options.continue_on_missing_finish === "boolean") {
     out.continue_on_missing_finish = options.continue_on_missing_finish
   }
+  if (typeof options.continue_on_compaction_failure === "boolean") {
+    out.continue_on_compaction_failure = options.continue_on_compaction_failure
+  }
   // Enumerated options are only recorded when actually valid. Coercing a bad
   // value to the default here would let it override a good value from the
   // project file, since precedence is decided by presence.
@@ -122,6 +125,7 @@ export function resolveConfig(
     max_consecutive: pick("max_consecutive"),
     settle_ms: pick("settle_ms"),
     continue_on_missing_finish: pick("continue_on_missing_finish"),
+    continue_on_compaction_failure: pick("continue_on_compaction_failure"),
     trigger_policy: normalizeTriggerPolicy(pick("trigger_policy"), DEFAULT_CONFIG.trigger_policy),
     log_level: normalizeLogLevel(pick("log_level"), DEFAULT_CONFIG.log_level),
     log_path:

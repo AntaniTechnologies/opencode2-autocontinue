@@ -11,6 +11,7 @@ export function createSessionStateStore() {
       lastInjectedAt: undefined,
       consecutiveCount: 0,
       lastAssistantMessageId: undefined,
+      lastCompactionMessageId: undefined,
       inFlight: false,
       deferredTimer: undefined,
     }

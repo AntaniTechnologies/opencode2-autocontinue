@@ -10,6 +10,10 @@ export type PluginEvent = {
   type: string
   data?: {
     sessionID?: string
+    /** Present on `session.execution.failed` and `session.compaction.failed`. */
+    error?: { type?: unknown; message?: unknown }
+    /** Present on `session.compaction.failed`. */
+    reason?: unknown
   }
 }
 
@@ -18,8 +22,16 @@ export type PluginEvent = {
  * reliable one: OpenCode's `session.idle` is published from the runner's
  * `onIdle` callback and does not reliably reach plugin subscribers, so a turn
  * can finish with no idle event at all. See "Why execution.succeeded" in README.
+ *
+ * `session.compaction.failed` is the one terminal failure worth recovering from.
+ * A summary that came back empty kills the turn without an assistant message, so
+ * without it the session is stranded exactly as if the model had hung.
  */
-export type IdleTrigger = "session.idle" | "session.execution.succeeded" | "cooldown-deferred"
+export type IdleTrigger =
+  | "session.idle"
+  | "session.execution.succeeded"
+  | "session.compaction.failed"
+  | "cooldown-deferred"
 
 type ResolvedContext = {
   messageId: string | undefined
@@ -40,7 +52,46 @@ type ResolvedContext = {
   userMessagePending: boolean
   /** Short excerpt of the last assistant text, for triage in the log. */
   excerpt: string | undefined
+  /**
+   * The newest failed compaction, when one ended the turn. OpenCode records a
+   * `type: "compaction"`, `status: "failed"` message and then fails the step, so
+   * the summary attempt is the only evidence that anything went wrong.
+   */
+  compactionFailure: CompactionFailure | undefined
 }
+
+type CompactionFailure = {
+  messageId: string
+  /** "auto" for a compaction the session ran on itself, "manual" for /compact. */
+  reason: string | undefined
+  /** e.g. "compaction.failed". */
+  errorType: string | undefined
+  /** e.g. "Compaction produced no summary". */
+  errorMessage: string | undefined
+}
+
+/**
+ * Compaction failures worth another attempt.
+ *
+ * A summary pass that returns nothing usable is usually a reasoning-only
+ * response (upstream #41571, #44080): the model spends its output budget
+ * thinking and never writes the template. That is model behaviour, not a
+ * property of the conversation, so a retry on a fresh pass frequently succeeds
+ * — the same session compacted fine minutes later.
+ *
+ * Deliberately excluded, because another attempt cannot help:
+ *  - `compaction.interrupted`: the user pressed Esc. Retrying would override a
+ *    deliberate stop.
+ *  - `compaction.unavailable` ("Nothing to compact yet"): not a failure to retry.
+ *  - `provider.unsupported-operation`: the model cannot compact at all.
+ *  - "reached the output token limit" and "cannot be reduced further": the same
+ *    request fails the same way every time, so retrying only burns tokens.
+ */
+const RETRYABLE_COMPACTION_ERROR_TYPES = new Set(["compaction.failed"])
+const UNRETRYABLE_COMPACTION_MESSAGES = [
+  "reached the output token limit",
+  "cannot be reduced further",
+]
 
 /**
  * Finish reasons that mean the model was cut off or left work queued, as
@@ -99,13 +150,54 @@ const EMPTY_CONTEXT: ResolvedContext = {
   hasOutput: false,
   userMessagePending: false,
   excerpt: undefined,
+  compactionFailure: undefined,
 }
 
+/**
+ * Read a `type: "compaction"`, `status: "failed"` message. OpenCode keeps the
+ * reason and the structured error alongside the compaction's own token usage,
+ * which is where "Compaction produced no summary" and the tell-tale ~100 output
+ * tokens live.
+ */
+function compactionFailureFrom(msg: SessionMessage): CompactionFailure | undefined {
+  const raw = msg as unknown as { status?: unknown; reason?: unknown; error?: unknown }
+  if (raw.status !== "failed") return undefined
+  return {
+    messageId: msg.id,
+    reason: typeof raw.reason === "string" ? raw.reason : undefined,
+    errorType: errorTypeOf(raw.error),
+    errorMessage: errorMessageOf(raw.error),
+  }
+}
+
+function errorTypeOf(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined
+  if (typeof value === "string") return value
+  const type = (value as { type?: unknown }).type
+  return typeof type === "string" ? type : undefined
+}
+
+function errorMessageOf(value: unknown): string | undefined {
+  if (typeof value === "string") return value
+  const message = (value as { message?: unknown } | null)?.message
+  return typeof message === "string" ? message : undefined
+}
+
+/**
+ * Walk backwards for both the last assistant message and the last failed
+ * compaction. They are tracked in one pass because the deciding question is
+ * which came last: a compaction that failed *after* the final assistant message
+ * is what ended the turn, whereas an older one was already recovered from.
+ */
 function resolveLastAssistantContext(messages: SessionMessage[]): ResolvedContext {
   let userMessagePending = false
+  let compactionFailure: CompactionFailure | undefined
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i]
     if (msg.type === "user") userMessagePending = true
+    if (msg.type === "compaction" && compactionFailure === undefined) {
+      compactionFailure = compactionFailureFrom(msg)
+    }
     if (msg.type !== "assistant") continue
 
     const full = textFromContent(msg.content).trim()
@@ -127,9 +219,12 @@ function resolveLastAssistantContext(messages: SessionMessage[]): ResolvedContex
       hasOutput: full.length > 0 || hasToolCall(msg.content),
       userMessagePending,
       excerpt: full.length > 0 ? full.slice(0, EXCERPT_LIMIT) : undefined,
+      compactionFailure,
     }
   }
-  return EMPTY_CONTEXT
+  // No assistant message at all: a compaction can fail before the first step
+  // produces one, and that failure is still the reason the session stopped.
+  return { ...EMPTY_CONTEXT, userMessagePending, compactionFailure }
 }
 
 /**
@@ -140,7 +235,10 @@ function resolveLastAssistantContext(messages: SessionMessage[]): ResolvedContex
  * stalled.
  */
 function isSettled(ctx: ResolvedContext): boolean {
-  return ctx.finish !== undefined || ctx.error !== undefined || ctx.completed
+  if (ctx.finish !== undefined || ctx.error !== undefined || ctx.completed) return true
+  // A failed compaction is already terminal, so there is nothing left to wait
+  // for on the assistant side.
+  return ctx.compactionFailure !== undefined
 }
 
 type Verdict = { continue: boolean; reason: string }
@@ -150,13 +248,44 @@ type Verdict = { continue: boolean; reason: string }
  * not positively identified as a stall is left alone: a spurious "continue"
  * on a finished task is worse than a missed recovery.
  */
+/**
+ * Whether a failed compaction is worth retrying. Narrow on purpose: the session
+ * must look stalled *because of* this specific failure, not merely alongside it.
+ */
+function classifyCompaction(failure: CompactionFailure): Verdict {
+  const detail = `${failure.errorType ?? "unknown"}: ${failure.errorMessage ?? "no message"}`
+  // A manual /compact reports its outcome to the user, who is watching the
+  // session and can re-run it. Injecting would start a turn nobody asked for.
+  if (failure.reason === "manual")
+    return { continue: false, reason: `manual compaction failed (${detail}); not retrying` }
+  if (failure.reason !== undefined && failure.reason !== "auto")
+    return { continue: false, reason: `compaction reason=${failure.reason} (${detail}); not retrying` }
+  if (!failure.errorType || !RETRYABLE_COMPACTION_ERROR_TYPES.has(failure.errorType))
+    return { continue: false, reason: `compaction error type not retryable (${detail})` }
+  const message = (failure.errorMessage ?? "").toLowerCase()
+  if (UNRETRYABLE_COMPACTION_MESSAGES.some((unretryable) => message.includes(unretryable)))
+    return { continue: false, reason: `compaction failure is deterministic (${detail})` }
+  return { continue: true, reason: `compaction failed: ${detail}` }
+}
+
 function classify(
   ctx: ResolvedContext,
   policy: "always" | "unfinished",
   continueOnMissingFinish: boolean,
+  continueOnCompactionFailure: boolean,
 ): Verdict {
   // A failed turn is never retried blindly, whatever the policy.
   if (ctx.error) return { continue: false, reason: "assistant message carries an error" }
+
+  // Checked before the assistant turn: when compaction is what ended the
+  // session, the stale assistant message before it usually finished cleanly
+  // and would otherwise read as "not a stall".
+  if (ctx.compactionFailure) {
+    if (!continueOnCompactionFailure)
+      return { continue: false, reason: "compaction failed (continue_on_compaction_failure is off)" }
+    return classifyCompaction(ctx.compactionFailure)
+  }
+
   if (policy === "always") return { continue: true, reason: "trigger_policy=always" }
 
   if (ctx.finish) {
@@ -183,6 +312,21 @@ function resolveAgentFromUserMessages(messages: SessionMessage[]): string | unde
     if (agents.length > 0) return agents[agents.length - 1].name
   }
   return undefined
+}
+
+/**
+ * Whether the user has sent anything after the failed compaction. The
+ * compaction message id anchors the search because the assistant-relative check
+ * cannot see it: a summary failure emits no assistant message, so the previous
+ * reply sits earlier and our own injected "continue" looks like fresh input.
+ */
+function compactionHasPendingUserMessage(messages: SessionMessage[], compactionMessageId: string): boolean {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i]
+    if (msg.id === compactionMessageId) return false
+    if (msg.type === "user") return true
+  }
+  return false
 }
 
 function hasRealUserMessageAfterLastContinue(
@@ -340,11 +484,29 @@ export function createIdleHandler(args: {
       return
     }
 
-    if (!assistantCtx.messageId) {
+    // A failed compaction is a stall in its own right: it can end the turn with
+    // no assistant message at all, and when there is one it predates the failed
+    // summary, so it says nothing about whether the turn finished.
+    const compactionFailure = assistantCtx.compactionFailure
+
+    if (!assistantCtx.messageId && !compactionFailure) {
       log.info("skip: no assistant message in context", { ...snapshot, messageCount: messages.length })
       return
     }
-    if (state.lastAssistantMessageId === assistantCtx.messageId) {
+
+    // Deduplicate on whichever record actually ended the turn. Keying a
+    // compaction recovery on the assistant message would block its own retry:
+    // a summary that fails again produces no new assistant message, so the id
+    // never changes and the second attempt would look already-handled.
+    if (compactionFailure) {
+      if (state.lastCompactionMessageId === compactionFailure.messageId) {
+        log.info("skip: already continued past this compaction failure", {
+          ...snapshot,
+          compactionMessageId: compactionFailure.messageId,
+        })
+        return
+      }
+    } else if (state.lastAssistantMessageId === assistantCtx.messageId) {
       log.info("skip: already continued past this assistant message", {
         ...snapshot,
         assistantMessageId: assistantCtx.messageId,
@@ -355,10 +517,16 @@ export function createIdleHandler(args: {
     // A user message after the last assistant reply means a turn is already
     // queued or starting (including our own earlier "continue"). The session
     // is not stalled, it is about to work.
-    if (assistantCtx.userMessagePending) {
-      log.info("skip: user message is already waiting after the last assistant message", {
+    //
+    // Measured from the failed compaction rather than the assistant message
+    // when there is one: our own "continue" is delivered as a user message, so
+    // the assistant-relative check would see our previous injection sitting
+    // after the last reply and refuse to retry the summary it just lost.
+    if (compactionFailure ? compactionHasPendingUserMessage(messages, compactionFailure.messageId) : assistantCtx.userMessagePending) {
+      log.info("skip: user message is already waiting after the last turn ended", {
         ...snapshot,
-        assistantMessageId: assistantCtx.messageId,
+        ...(assistantCtx.messageId === undefined ? {} : { assistantMessageId: assistantCtx.messageId }),
+        ...(compactionFailure ? { compactionMessageId: compactionFailure.messageId } : {}),
       })
       return
     }
@@ -383,7 +551,12 @@ export function createIdleHandler(args: {
     const agent = assistantCtx.agent ?? resolveAgentFromUserMessages(messages)
 
     // Distinguish a genuine stall from a task that finished normally.
-    const verdict = classify(assistantCtx, config.trigger_policy, config.continue_on_missing_finish)
+    const verdict = classify(
+      assistantCtx,
+      config.trigger_policy,
+      config.continue_on_missing_finish,
+      config.continue_on_compaction_failure,
+    )
     if (!verdict.continue) {
       log.info("skip: last assistant turn is not a stall", {
         ...snapshot,
@@ -392,6 +565,13 @@ export function createIdleHandler(args: {
         rawFinish: assistantCtx.rawFinish,
         completed: assistantCtx.completed,
         trigger_policy: config.trigger_policy,
+        ...(compactionFailure
+          ? {
+              compactionMessageId: compactionFailure.messageId,
+              compactionReason: compactionFailure.reason,
+              compactionError: compactionFailure.errorMessage,
+            }
+          : {}),
       })
       return
     }
@@ -414,6 +594,15 @@ export function createIdleHandler(args: {
       finish: assistantCtx.finish,
       rawFinish: assistantCtx.rawFinish,
       lastAssistantText: assistantCtx.excerpt,
+      // The distinguishing fields for a compaction recovery, so triage can tell
+      // this apart from an ordinary length-stall without reading session state.
+      ...(compactionFailure
+        ? {
+            compactionMessageId: compactionFailure.messageId,
+            compactionReason: compactionFailure.reason,
+            compactionError: compactionFailure.errorMessage,
+          }
+        : {}),
     })
     try {
       if (agent) {
@@ -439,6 +628,7 @@ export function createIdleHandler(args: {
       await ctx.session.prompt({ sessionID, text: config.message })
 
       state.lastAssistantMessageId = assistantCtx.messageId
+      if (compactionFailure) state.lastCompactionMessageId = compactionFailure.messageId
       state.consecutiveCount += 1
       state.lastInjectedAt = Date.now()
       log.info("continuation injected", {

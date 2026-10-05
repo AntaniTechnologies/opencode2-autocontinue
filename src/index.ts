@@ -51,7 +51,7 @@ const plugin = {
       configFile: initial.configFile,
       ...(initial.configParseError === undefined ? {} : { configParseError: initial.configParseError }),
       logFile: logger.path ?? "disabled",
-      triggers: ["session.execution.succeeded", "session.idle"],
+      triggers: ["session.execution.succeeded", "session.idle", "session.execution.failed"],
     })
     if (initial.configParseError) {
       logger.error("config file could not be parsed, using defaults", {
@@ -70,7 +70,10 @@ const plugin = {
     // park later events, so a `session.execution.started` arriving mid-decision
     // could not mark the session busy until the stale decision had already
     // fired its "continue".
-    const dispatchIdle = (sessionID: string, trigger: "session.idle" | "session.execution.succeeded") => {
+    const dispatchIdle = (
+      sessionID: string,
+      trigger: "session.idle" | "session.execution.succeeded" | "session.compaction.failed",
+    ) => {
       handler.onBecameIdle(sessionID, trigger).catch((error) => {
         logger.error("idle handler threw", { sessionID, trigger, error })
       })
@@ -97,17 +100,40 @@ const plugin = {
                 dispatchIdle(sessionID, "session.execution.succeeded")
               }
               break
-            case "session.execution.failed":
-            case "session.execution.interrupted":
-              // Busy is cleared, but these do not trigger a continuation: a
-              // failure should not be retried blindly, and an interrupt is the
-              // user deliberately stopping work.
-              if (sessionID) {
-                busy.delete(sessionID)
+            case "session.execution.failed": {
+              // Busy is cleared, and a failure is never retried blindly. The one
+              // exception is a compaction summary that came back unusable: it
+              // ends the turn with no assistant message at all, so nothing else
+              // would ever re-drive the session.
+              //
+              // The event's own error is only a cheap pre-filter. The runner
+              // surfaces a compaction failure as a StepFailedError, so
+              // `toSessionError` passes the compaction error straight through;
+              // the handler still re-reads the session and decides from that,
+              // because the event alone cannot tell a recoverable summary
+              // failure from a deterministic one.
+              if (!sessionID) break
+              busy.delete(sessionID)
+              const errorType = typed.data?.error?.type
+              if (typeof errorType === "string" && errorType.startsWith("compaction.")) {
+                logger.debug("execution failed on compaction, considering a continuation", {
+                  sessionID,
+                  errorType,
+                })
+                dispatchIdle(sessionID, "session.compaction.failed")
+              } else {
                 logger.debug("execution ended without success, not continuing", {
                   sessionID,
-                  outcome: typed.type,
+                  errorType,
                 })
+              }
+              break
+            }
+            case "session.execution.interrupted":
+              // The user deliberately stopped work; never continue past that.
+              if (sessionID) {
+                busy.delete(sessionID)
+                logger.debug("execution interrupted, not continuing", { sessionID })
               }
               break
             case "session.idle":

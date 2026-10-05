@@ -78,6 +78,8 @@ npm test
 
 This drives the real `setup()` with a mock plugin context and real-shaped V2 events. It covers injection after a completed turn (including the case where no `session.idle` is ever delivered), duplicate suppression, the no-assistant-message case, the disabled case, agent/model continuity, the `max_consecutive` cap, cooldown deferral, `finish`-reason gating for both trigger policies, cross-project isolation, and the activity log.
 
+Failed-compaction recovery is covered against a message shape lifted from a real session row (`status: "failed"`, `error.type: "compaction.failed"`, 44K in / 96 out): injection on an auto summary failure, recovery with no assistant message present, the manual-`/compact` and interrupted exclusions, the deterministic failures that are left alone, non-compaction execution failures staying ignored, deduplication on the failed compaction's id, a retry that fails again counting as a fresh stall, `max_consecutive` still applying, a user message after the failure blocking injection, and a *completed* compaction being treated as history rather than a stall.
+
 The tests mock the event stream, so they do not prove a live server emits the trigger events you expect. To confirm that end to end, run a real session and check the activity log:
 
 ```bash
@@ -93,6 +95,7 @@ When a session's turn completes, the plugin injects a continuation message (defa
 **Key behaviors:**
 - Triggers on `session.execution.succeeded`, **not** on `session.idle` (see below)
 - Only continues turns that look cut short, based on the assistant's finish reason
+- Recovers sessions stranded by a failed compaction (see below)
 - Resolves the last assistant's agent and model to maintain context continuity (via `switchAgent`/`switchModel` before prompting)
 - Respects a cooldown period between consecutive injections
 - Caps the maximum number of consecutive continuations to prevent infinite loops
@@ -107,6 +110,14 @@ When a session's turn completes, the plugin injects a continuation message (defa
 Earlier versions triggered on `session.idle`. In practice that event does not reach plugin subscribers: across 8360 events in a 48-minute debug capture, `session.idle` was delivered **zero** times, including for a session that demonstrably completed its turn (`ses_f03e1d…` emitted `session.execution.succeeded` at 11:56:16 and then simply stopped). The plugin therefore never ran its trigger at all — not a guard, not a cooldown, not a bad config.
 
 `session.idle` is published by OpenCode from its runner's `onIdle` callback (`session/run-state.ts` → `SessionStatus.set({ type: "idle" })`), and it is not reaching V2 plugin subscribers. `session.execution.succeeded` is delivered reliably, carries the same `sessionID`, and is still emitted when a session stalls mid-task. It is now the primary trigger; `session.idle` is still handled so the plugin keeps working if that event ever becomes reliable.
+
+In V2 `session.idle` is in fact not an event at all: idleness is recorded as an `Idle` *message* (`type: "idle"`, `outcome: "succeeded" | "failed" | "interrupted"`) written when a terminal execution event is projected. That is why the plugin treats the execution lifecycle events as its trigger surface.
+
+### Why execution.failed is also a trigger
+
+`session.execution.failed` was previously ignored outright, on the reasonable assumption that a failure should not be retried blindly. That assumption holds for provider and tool errors, but not for one case: a compaction summary that comes back unusable fails the step (`Session.StepFailedError`) and ends the turn without ever producing an assistant message. Since the compaction sits on top of the agent's own output, retrying it is retrying a summary pass, not a failed model call.
+
+The event is used only as a cheap pre-filter — its `error.type` must start with `compaction.` — and the actual decision is made from the session state, so a provider failure carrying an unrelated error never reaches the continuation path. See [Failed compaction](#failed-compaction-compaction-produced-no-summary) for which compaction failures qualify.
 
 ### Distinguishing a stall from finished work
 
@@ -123,6 +134,38 @@ Earlier versions triggered on `session.idle`. In practice that event does not re
 `length` is the signature of the stall this plugin exists to catch: e.g. for a provider configured with `"output": 8192`, a long turn that gets truncated still reports success. A message with **no** finish reason is not assumed to be a stall: the plugin first waits up to `settle_ms` for the host to write it (the execution event can arrive before the message is fully recorded), and if it still never appears the turn is continued only when a tool call was left unresolved. Set `continue_on_missing_finish: true` for providers that never report one. Messages carrying an `error` are never continued, and neither is a session that already has a user message queued after the last assistant reply. A `stop` that produced no text and no tool call is treated as a stall.
 
 Known blind spot: a stall where the model emits a clean `stop` while work remains is indistinguishable from finishing, and will not be continued. Set `trigger_policy: "always"` if you would rather have full recall and accept the extra round-trips.
+
+## Failed compaction: "Compaction produced no summary"
+
+A session can stop on a stall that never produces an assistant message at all. When the context crosses the compaction threshold, OpenCode runs a separate summarization pass, and if that pass returns nothing usable it fails the whole turn:
+
+```
+Compaction · 98.5K in · 96 out
+Compaction produced no summary
+```
+
+96 output tokens is the tell: reasoning models often spend their entire output budget thinking and never write the summary text ([#41571](https://github.com/anomalyco/opencode/issues/41571), [#44080](https://github.com/anomalyco/opencode/issues/44080), [#42371](https://github.com/anomalyco/opencode/issues/42371)). Nothing is lost — the transcript is left intact — but the session is stranded, and since the context is still over the threshold, every future turn hits the same wall.
+
+This is a genuinely different shape from a normal stall, and the plugin treats it separately:
+
+- The failure is recorded as a `type: "compaction"`, `status: "failed"` message, **not** an assistant message. There is no finish reason to read, so the table above does not apply.
+- It surfaces as `session.execution.failed`, not `succeeded` — so it would otherwise be skipped along with genuine failures.
+- The assistant message that *did* exist before it usually ended in a clean `stop`, so judging that message would read "finished, leave it alone".
+
+The plugin therefore checks the failed-compaction message first, and recovers only when the failure is plausibly transient:
+
+| Compaction failure | Continue? |
+|---|---|
+| `compaction.failed` — no summary, or template not filled | **yes** |
+| `compaction.interrupted` — you pressed Esc | no |
+| `reason: "manual"` — a `/compact` you ran | no |
+| reached the output token limit | no |
+| "cannot be reduced further" | no |
+| `provider.unsupported-operation` | no |
+
+A retry is worth it because the fault is the model's behaviour on one pass, not a property of the conversation — the same session frequently compacts successfully moments later. The deterministic rows above would fail identically forever, so they are left alone rather than burning tokens. A manual `/compact` reports its own outcome to you and is never second-guessed.
+
+Retries are bounded by the usual `cooldown_ms` and `max_consecutive`, and deduplicated on the failed compaction's message id, so one failure produces one continuation. Set `continue_on_compaction_failure: false` to disable this path entirely.
 
 ## Configuration
 
@@ -185,6 +228,7 @@ grep '"msg":"plugin loaded"' ~/.local/share/opencode/log/opencode2-autocontinue.
 | `trigger_policy` | `"unfinished"` \| `"always"` | `"unfinished"` | live | `"unfinished"` continues only turns whose finish reason looks cut short; `"always"` continues after every completed turn. See [below](#distinguishing-a-stall-from-finished-work). |
 | `settle_ms` | `number` | `2000` | live | Max time to wait for the last assistant message to receive its finish reason before judging it. |
 | `continue_on_missing_finish` | `boolean` | `false` | live | Continue even when no finish reason ever appears and nothing else proves a stall. |
+| `continue_on_compaction_failure` | `boolean` | `true` | live | Continue a session that ended because an automatic compaction produced no usable summary. See [Failed compaction](#failed-compaction-compaction-produced-no-summary). |
 | `log_level` | `"debug"` \| `"info"` \| `"warn"` \| `"error"` \| `"off"` | `"info"` | **restart** | Verbosity. `"debug"` also records every ignored event. `"off"` writes nothing at all. |
 | `log_path` | `string` | see [log resolution](#log-file-resolution) | **restart** | Log file path. Relative paths resolve against the project directory. |
 | `log_console` | `boolean` | `false` | **restart** | Also echo records to the plugin process's stderr. |

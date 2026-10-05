@@ -561,7 +561,252 @@ console.log("case 25: session goes busy during the settle wait -> expect NO inje
   check("injections", prompts.length, 0)
 }
 
-console.log("case 26: legacy auto-continue.json config is still honored, new name wins")
+// --- Compaction summary failures -------------------------------------------
+// A compaction that produces no usable summary kills the turn without an
+// assistant message. Shape taken from a real session row:
+//   {"type":"compaction","id":"msg_c1","status":"failed","reason":"auto",
+//    "error":{"type":"compaction.failed","message":"Compaction produced no summary"},
+//    "tokens":{"input":44175,"output":96}}
+function failedCompaction(over: Record<string, unknown> = {}) {
+  return {
+    type: "compaction",
+    id: "msg_c1",
+    status: "failed",
+    reason: "auto",
+    error: { type: "compaction.failed", message: "Compaction produced no summary" },
+    tokens: { input: 44175, output: 96 },
+    time: { created: 1791187060713 },
+    ...over,
+  }
+}
+
+// The real shape: last assistant turn finished cleanly, then the summary pass
+// failed on top of it.
+function stalledOnCompaction(compaction: Record<string, unknown> = failedCompaction()) {
+  return [
+    ...makeMessages(true, "go", "stop"),
+    compaction,
+    { type: "idle", id: "msg_i1", outcome: "failed" },
+  ]
+}
+
+async function runFailedExecution(dir: string, messages: any, sid: string, errorType?: string, wait = 600) {
+  reset()
+  const h = makeCtx(dir, messages, {})
+  const cleanup = await plugin.setup(h.ctx)
+  h.push(
+    { type: "session.execution.started", data: { sessionID: sid } },
+    {
+      type: "session.execution.failed",
+      data: { sessionID: sid, ...(errorType === undefined ? {} : { error: { type: errorType } }) },
+    },
+  )
+  await new Promise((r) => setTimeout(r, wait))
+  await cleanup?.()
+}
+
+console.log("case 26: auto compaction produced no summary -> expect injection")
+{
+  await runFailedExecution(mkDir({}, "cok"), stalledOnCompaction(), "ses_c1", "compaction.failed")
+  check("injections", prompts.length, 1)
+  check("prompt text", prompts[0]?.text, "continue")
+}
+
+console.log("case 27: recovery log records the compaction failure, not a stale finish reason")
+{
+  const dir = mkDir({}, "clog")
+  reset()
+  const h = makeCtx(dir, stalledOnCompaction(), {})
+  const cleanup = await plugin.setup(h.ctx)
+  h.push(
+    { type: "session.execution.started", data: { sessionID: "ses_c2" } },
+    { type: "session.execution.failed", data: { sessionID: "ses_c2", error: { type: "compaction.failed" } } },
+  )
+  await new Promise((r) => setTimeout(r, 600))
+  await cleanup?.()
+
+  const lines = readFileSync(join(dir, "opencode2-autocontinue.log"), "utf-8")
+    .trim()
+    .split("\n")
+    .map((l) => JSON.parse(l))
+  const rec = lines.find((l) => l.msg === "injecting continuation")
+  check("compaction message id logged", rec?.compactionMessageId, "msg_c1")
+  check("compaction reason logged", rec?.compactionReason, "auto")
+  check("compaction error logged", rec?.compactionError, "Compaction produced no summary")
+  check("reason names the compaction failure", /compaction failed/.test(rec?.reason ?? ""), true)
+}
+
+console.log("case 28: compaction failed with no assistant message at all -> expect injection")
+{
+  await runFailedExecution(mkDir({}, "cnoassist"), [failedCompaction(), { type: "idle", id: "msg_i1", outcome: "failed" }], "ses_c3", "compaction.failed")
+  check("injections", prompts.length, 1)
+}
+
+console.log("case 29: manual /compact failure -> expect NO injection (user is watching)")
+{
+  await runFailedExecution(
+    mkDir({}, "cmanual"),
+    stalledOnCompaction(failedCompaction({ reason: "manual" })),
+    "ses_c4",
+    "compaction.failed",
+  )
+  check("injections", prompts.length, 0)
+}
+
+console.log("case 30: continue_on_compaction_failure=false -> expect NO injection")
+{
+  await runFailedExecution(
+    mkDir({ continue_on_compaction_failure: false }, "coff"),
+    stalledOnCompaction(),
+    "ses_c5",
+    "compaction.failed",
+  )
+  check("injections", prompts.length, 0)
+}
+
+console.log("case 31: non-compaction execution failure -> expect NO injection")
+{
+  // finish=length would normally be a stall, but the turn failed for an
+  // unrelated provider reason and must not be retried blindly.
+  await runFailedExecution(mkDir({}, "cother"), makeMessages(true, "go", "length"), "ses_c6", "provider.internal")
+  check("injections", prompts.length, 0)
+}
+
+console.log("case 32: interrupted compaction -> expect NO injection (deliberate stop)")
+{
+  await runFailedExecution(
+    mkDir({}, "cint"),
+    stalledOnCompaction(
+      failedCompaction({ error: { type: "compaction.interrupted", message: "Compaction was interrupted" } }),
+    ),
+    "ses_c7",
+    "compaction.interrupted",
+  )
+  check("injections", prompts.length, 0)
+}
+
+console.log("case 33: deterministic compaction failures -> expect NO injection")
+{
+  await runFailedExecution(
+    mkDir({}, "cdet1"),
+    stalledOnCompaction(
+      failedCompaction({ error: { type: "compaction.failed", message: "Compaction summary reached the output token limit" } }),
+    ),
+    "ses_c8",
+    "compaction.failed",
+  )
+  check("output token limit not retried", prompts.length, 0)
+
+  await runFailedExecution(
+    mkDir({}, "cdet2"),
+    stalledOnCompaction(
+      failedCompaction({ error: { type: "compaction.failed", message: "The compaction request cannot be reduced further without losing the latest exchange or checkpoint" } }),
+    ),
+    "ses_c9",
+    "compaction.failed",
+  )
+  check("cannot-be-reduced not retried", prompts.length, 0)
+}
+
+console.log("case 34: repeat failure on the same compaction message -> expect exactly 1 injection")
+{
+  reset()
+  const dir = mkDir({}, "cdup")
+  const h = makeCtx(dir, stalledOnCompaction(), {})
+  const cleanup = await plugin.setup(h.ctx)
+  // Two terminal events for one failed compaction (e.g. failed then idle).
+  h.push(
+    { type: "session.execution.failed", data: { sessionID: "ses_c10", error: { type: "compaction.failed" } } },
+    { type: "session.idle", data: { sessionID: "ses_c10" } },
+  )
+  await new Promise((r) => setTimeout(r, 600))
+  check("injections", prompts.length, 1)
+  await cleanup?.()
+}
+
+console.log("case 35: a retried compaction that fails again is a new stall -> expect a second injection")
+{
+  reset()
+  const dir = mkDir({ max_consecutive: 5 }, "cretry")
+  const h = makeCtx(dir, stalledOnCompaction(), {})
+  const cleanup = await plugin.setup(h.ctx)
+  h.push({ type: "session.execution.failed", data: { sessionID: "ses_c11", error: { type: "compaction.failed" } } })
+  await new Promise((r) => setTimeout(r, 600))
+  // The retry failed too, recorded under a fresh message id.
+  h.session.context = async () => stalledOnCompaction(failedCompaction({ id: "msg_c2" }))
+  h.push({ type: "session.execution.failed", data: { sessionID: "ses_c11", error: { type: "compaction.failed" } } })
+  await new Promise((r) => setTimeout(r, 600))
+  check("injections", prompts.length, 2)
+  await cleanup?.()
+}
+
+console.log("case 36: compaction recovery honours the consecutive cap")
+{
+  reset()
+  const dir = mkDir({ max_consecutive: 2 }, "ccap")
+  // Real ordering per retry: the failed summary, the idle marker, then our
+  // injected "continue" as a user message, then the next failed summary.
+  const history: Array<Record<string, unknown>> = [
+    ...makeMessages(true, "go", "stop"),
+    failedCompaction(),
+    { type: "idle", id: "msg_i0", outcome: "failed" },
+  ]
+  const h = makeCtx(dir, history, {})
+  h.session.context = async () => history
+  const cleanup = await plugin.setup(h.ctx)
+
+  for (const n of [1, 2, 3, 4]) {
+    history.push(
+      { type: "user", id: `u_cont_${n}`, text: "continue" },
+      failedCompaction({ id: `msg_c${n}` }),
+      { type: "idle", id: `msg_i${n}`, outcome: "failed" },
+    )
+    h.push({ type: "session.execution.failed", data: { sessionID: "ses_c12", error: { type: "compaction.failed" } } })
+    await new Promise((r) => setTimeout(r, 600))
+  }
+  check("injections with max_consecutive=2", prompts.length, 2)
+  await cleanup?.()
+}
+
+console.log("case 37: user message after the failed compaction -> expect NO injection")
+{
+  const msgs = [...stalledOnCompaction(), { type: "user", id: "u_next", text: "carry on" }]
+  await runFailedExecution(mkDir({}, "cqueued"), msgs, "ses_c13", "compaction.failed")
+  check("injections", prompts.length, 0)
+}
+
+console.log("case 38: a completed compaction is history, not a stall -> expect NO injection")
+{
+  const msgs = [
+    ...makeMessages(true, "go", "stop"),
+    {
+      type: "compaction",
+      id: "msg_c1",
+      status: "completed",
+      reason: "auto",
+      summary: "## Objective\n- ship it",
+      recent: "",
+    },
+    { type: "idle", id: "msg_i1", outcome: "succeeded" },
+  ]
+  await runFailedExecution(mkDir({}, "cdone"), msgs, "ses_c14", "compaction.failed")
+  check("injections", prompts.length, 0)
+}
+
+console.log("case 39: continue_on_compaction_failure is configurable and validated")
+{
+  const { resolveConfig } = await import("../dist/config.js")
+  const d = mkDir({ continue_on_compaction_failure: false }, "cconf")
+  check("file value honored", resolveConfig(d, {}).config.continue_on_compaction_failure, false)
+  check("source is the file", resolveConfig(d, {}).sources.continue_on_compaction_failure, "file")
+  check("option wins over file", resolveConfig(d, { continue_on_compaction_failure: true }).config.continue_on_compaction_failure, true)
+  // A wrong-typed value is ignored rather than coerced, so it cannot clobber the file.
+  const bad = mkDir({ continue_on_compaction_failure: false }, "cbad")
+  check("bad value ignored, file survives", resolveConfig(bad, { continue_on_compaction_failure: "yes" }).config.continue_on_compaction_failure, false)
+  check("defaults to on", resolveConfig(mkDir({}, "cdef"), {}).config.continue_on_compaction_failure, true)
+}
+
+console.log("case 40: legacy auto-continue.json config is still honored, new name wins")
 {
   reset()
   const d = mkdtempSync(join(tmpdir(), "ac-legacy-"))
